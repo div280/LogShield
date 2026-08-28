@@ -25,7 +25,7 @@ anti-forensic tampering in Windows Event Logs.
 - Event IDs: 1102, 4719, 4624, 4625, 4688, 4663, 4672
 
 ## Team
-Final Year Project — CSE Cyber Security
+Final Year Project - CSE Cyber Security
 Dayananda Sagar Academy of Technology and Management
 VTU, Bangalore
 Advisor: Dr. Gerard Deepak

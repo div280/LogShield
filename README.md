@@ -15,8 +15,8 @@ anti-forensic tampering in Windows Event Logs.
 2. AI/ML: Isolation Forest + LSTM + Autoencoder
 
 ## Operating Modes
-1. Forensic Analyzer — upload recovered .evtx or CSV
-2. Live Monitor — real-time Windows Event Log watching
+1. Forensic Analyzer - upload recovered .evtx or CSV
+2. Live Monitor - real-time Windows Event Log watching
 
 ## Dataset
 - Source: Real Windows Security Event Logs

@@ -20,13 +20,16 @@ import requests
 from datetime import datetime
 sys.path.insert(0, '.')
 
-from src.parser import parse_csv_from_bytes
+from src.parser import parse_csv_from_bytes, MAX_FILE_SIZE
 from src.features import extract_features
 from src.hmac_chain import (
     verify_hmac_chain,
-    check_chain_continuity)
+    check_chain_continuity,
+    check_baseline_row_count)
 from src.models.isolation_forest import predict_anomalies
 from dashboard.utils.pdf_report import generate_pdf_report
+from dashboard.utils.threat_panels import build_all_threat_panels
+from dashboard.utils.threat_render import render_threat_overview
 
 st.set_page_config(
     page_title="LogShield",
@@ -74,6 +77,12 @@ if 'process_chart' not in st.session_state:
     st.session_state.process_chart = []
 if 'flagged_preview' not in st.session_state:
     st.session_state.flagged_preview = None
+if 'threat_panels' not in st.session_state:
+    st.session_state.threat_panels = None
+if 'baseline_mismatch' not in st.session_state:
+    st.session_state.baseline_mismatch = False
+if 'baseline_warning' not in st.session_state:
+    st.session_state.baseline_warning = ''
 
 dm = st.session_state.dark_mode
 
@@ -139,12 +148,16 @@ html, body, .stApp {{
 [data-testid="stSidebar"] {{
     background: {SIDEBAR} !important;
     border-right: 1px solid {BORDER} !important;
-    min-width: 220px !important;
-    max-width: 220px !important;
+    z-index: 999 !important;
 }}
 
-[data-testid="stSidebar"] > div {{
-    padding: 0 !important;
+[data-testid="stSidebar"][aria-expanded="true"] {{
+    min-width: 230px !important;
+    max-width: 230px !important;
+}}
+
+[data-testid="stSidebar"] > div:first-child {{
+    padding-top: 0 !important;
 }}
 
 /* MAIN AREA */
@@ -152,14 +165,106 @@ html, body, .stApp {{
     background: {BG} !important;
 }}
 
-/* HIDE STREAMLIT CHROME */
+/* STREAMLIT CHROME AND HEADER CONTROLS */
 footer {{ display: none !important; }}
 #MainMenu {{ display: none !important; }}
-header {{ display: none !important; }}
+[data-testid="stDecoration"] {{ display: none !important; }}
+[data-testid="stToolbarActions"] {{ display: none !important; }}
+[data-testid="stDeployButton"] {{ display: none !important; }}
+
+/* Keep header and toolbar transparent with pointer-events pass-through */
+header[data-testid="stHeader"],
 [data-testid="stToolbar"] {{
-    display: none !important; }}
-[data-testid="stDecoration"] {{
-    display: none !important; }}
+    background: transparent !important;
+    z-index: 10000 !important;
+    pointer-events: none !important;
+    display: flex !important;
+    visibility: visible !important;
+}}
+
+/* Enable pointer events on all sidebar toggle controls */
+header[data-testid="stHeader"] button,
+header[data-testid="stHeader"] [data-testid="collapsedControl"],
+header[data-testid="stHeader"] [data-testid="stSidebarCollapsedControl"],
+header[data-testid="stHeader"] [data-testid="stExpandSidebarButton"],
+[data-testid="stToolbar"] button,
+[data-testid="stToolbar"] [data-testid="stExpandSidebarButton"],
+[data-testid="collapsedControl"],
+[data-testid="stSidebarCollapsedControl"],
+[data-testid="stExpandSidebarButton"],
+[data-testid="stSidebarCollapseButton"] {{
+    pointer-events: auto !important;
+    cursor: pointer !important;
+}}
+
+/* EXPAND SIDEBAR BUTTON / COLLAPSED CONTROL (when sidebar is closed) */
+[data-testid="collapsedControl"],
+[data-testid="stSidebarCollapsedControl"],
+[data-testid="stExpandSidebarButton"] {{
+    display: flex !important;
+    visibility: visible !important;
+    opacity: 1 !important;
+    z-index: 10001 !important;
+    color: {TXT1} !important;
+    background: {SURFACE} !important;
+    border: 1px solid {BORDER} !important;
+    border-radius: 6px !important;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.18) !important;
+    transition: all 0.15s ease !important;
+}}
+
+[data-testid="collapsedControl"]:hover,
+[data-testid="stSidebarCollapsedControl"]:hover,
+[data-testid="stExpandSidebarButton"]:hover {{
+    border-color: {ACCENT} !important;
+    color: {ACCENT} !important;
+}}
+
+[data-testid="collapsedControl"] svg,
+[data-testid="stSidebarCollapsedControl"] svg,
+[data-testid="stExpandSidebarButton"] svg,
+[data-testid="stExpandSidebarButton"] span {{
+    fill: {TXT1} !important;
+    color: {TXT1} !important;
+    stroke: {TXT1} !important;
+}}
+
+[data-testid="collapsedControl"]:hover svg,
+[data-testid="stSidebarCollapsedControl"]:hover svg,
+[data-testid="stExpandSidebarButton"]:hover svg,
+[data-testid="stExpandSidebarButton"]:hover span {{
+    fill: {ACCENT} !important;
+    color: {ACCENT} !important;
+    stroke: {ACCENT} !important;
+}}
+
+/* COLLAPSE SIDEBAR BUTTON (when sidebar is open) */
+[data-testid="stSidebarCollapseButton"] {{
+    display: flex !important;
+    visibility: visible !important;
+    opacity: 1 !important;
+    color: {TXT2} !important;
+    z-index: 10001 !important;
+    border-radius: 6px !important;
+    transition: all 0.15s ease !important;
+}}
+
+[data-testid="stSidebarCollapseButton"]:hover {{
+    color: {TXT1} !important;
+    background: {NAV_SEL} !important;
+}}
+
+[data-testid="stSidebarCollapseButton"] svg,
+[data-testid="stSidebarCollapseButton"] span {{
+    fill: {TXT2} !important;
+    color: {TXT2} !important;
+}}
+
+[data-testid="stSidebarCollapseButton"]:hover svg,
+[data-testid="stSidebarCollapseButton"]:hover span {{
+    fill: {TXT1} !important;
+    color: {TXT1} !important;
+}}
 
 /* SIDEBAR NAV ITEMS */
 .nav-item {{
@@ -892,24 +997,19 @@ def _build_process_chart(df):
 def _build_flagged_preview(df):
     if 'if_flag' not in df.columns:
         return None
-    flagged = df[df['if_flag'] == 1]
-    if len(flagged) == 0:
+    from dashboard.utils.threat_panels import build_flagged_events_table
+    preview = build_flagged_events_table(df)
+    if len(preview) == 0:
         return None
-    show_cols = [
-        c for c in [
-            'time_created', 'event_id', 'account_name',
-            'process_name', 'is_critical_event', 'if_score'
-        ] if c in flagged.columns]
-    preview = (
-        flagged[show_cols]
-        .sort_values('if_score', ascending=False)
-        .head(100))
     return preview.to_json(orient='split')
 
 
 def run_analysis_pipeline(file_bytes):
     """Run full analysis pipeline on uploaded bytes."""
     df = parse_csv_from_bytes(file_bytes)
+    file_rows = len(df)
+    baseline_check = check_baseline_row_count(
+        file_rows, 'models_saved/hmac_chain.json')
     df = extract_features(df)
 
     CHAIN = 'models_saved/hmac_chain.json'
@@ -925,7 +1025,8 @@ def run_analysis_pipeline(file_bytes):
             injected = c['extra_records']
             chain_intact = (
                 not c['gap_detected'] and
-                not c['injection_detected'])
+                not c['injection_detected'] and
+                int(df['hmac_flag'].sum()) == 0)
         except Exception:
             hmac_ok = False
             chain_intact = False
@@ -965,9 +1066,13 @@ def run_analysis_pipeline(file_bytes):
         'hmac_ok': hmac_ok,
         'if_ok': if_ok,
         'chain_intact': chain_intact,
+        'baseline_mismatch': baseline_check['mismatch'],
+        'baseline_warning': baseline_check['message'],
         'timeline_data': _build_timeline_data(df),
         'process_chart': _build_process_chart(df),
         'flagged_preview': _build_flagged_preview(df),
+        'threat_panels': build_all_threat_panels(
+            df, verdict),
     }
 
 
@@ -987,10 +1092,16 @@ def save_analysis_to_session(result, file_bytes):
     st.session_state.hmac_ok = result['hmac_ok']
     st.session_state.if_ok = result['if_ok']
     st.session_state.chain_intact = result['chain_intact']
+    st.session_state.baseline_mismatch = (
+        result['baseline_mismatch'])
+    st.session_state.baseline_warning = (
+        result['baseline_warning'])
     st.session_state.timeline_data = result['timeline_data']
     st.session_state.process_chart = result['process_chart']
     st.session_state.flagged_preview = (
         result['flagged_preview'])
+    st.session_state.threat_panels = (
+        result['threat_panels'])
     st.session_state.analysis_time = (
         datetime.utcnow().strftime(
             "%Y-%m-%d %H:%M:%S UTC"))
@@ -1002,6 +1113,7 @@ def render_timeline_chart(timeline_data, height=340):
         return
     norm_count = timeline_data['norm_count']
     anom_count = timeline_data['anom_count']
+    threshold = 0.5
     fig = go.Figure()
     if norm_count > 0:
         fig.add_trace(go.Scattergl(
@@ -1015,7 +1127,9 @@ def render_timeline_chart(timeline_data, height=340):
                 opacity=0.4),
             hovertemplate=(
                 'Time: %{x}<br>'
-                'Score: %{y:.3f}'
+                'Anomaly score: %{y:.3f}<br>'
+                'This event matched normal temporal '
+                'patterns in the baseline'
                 '<extra>Normal</extra>')))
     if anom_count > 0:
         fig.add_trace(go.Scattergl(
@@ -1032,18 +1146,38 @@ def render_timeline_chart(timeline_data, height=340):
                     width=1)),
             hovertemplate=(
                 'Time: %{x}<br>'
-                'Score: %{y:.3f}'
+                'Anomaly score: %{y:.3f}<br>'
+                'Isolation Forest flagged this event as '
+                'a temporal outlier (possible gap attack)'
                 '<extra>ANOMALY</extra>')))
-    fig.add_hline(
-        y=0.5,
-        line=dict(color=WARN, width=1, dash='dash'),
-        annotation=dict(
-            text='Detection threshold',
-            font=dict(color=WARN, size=10),
-            xref='paper',
-            x=1))
+    fig.add_shape(
+        type='line',
+        xref='paper',
+        x0=0,
+        x1=1,
+        yref='y',
+        y0=threshold,
+        y1=threshold,
+        line=dict(color=WARN, dash='dash'))
+    fig.add_annotation(
+        xref='paper',
+        x=1,
+        y=threshold,
+        yref='y',
+        showarrow=False,
+        text='Threshold',
+        xanchor='left',
+        font=dict(color=WARN, size=10))
     fig.update_layout(
-        **make_chart_layout(height),
+        plot_bgcolor='rgba(0,0,0,0)',
+        paper_bgcolor='rgba(0,0,0,0)',
+        font=dict(
+            family='Inter, sans-serif',
+            color=TXT2,
+            size=11),
+        margin=dict(l=0, r=0, t=12, b=0),
+        height=height,
+        hovermode='closest',
         title=dict(
             text=(
                 f'Event Timeline  '
@@ -1056,14 +1190,20 @@ def render_timeline_chart(timeline_data, height=340):
         xaxis=dict(
             gridcolor=BORDER,
             linecolor=BORDER,
-            title='Time',
-            titlefont=dict(size=11, color=TXT2)),
+            title=dict(
+                text='Time',
+                font=dict(size=11, color=TXT2))),
         yaxis=dict(
             gridcolor=BORDER,
             linecolor=BORDER,
-            title='Anomaly Score',
-            titlefont=dict(size=11, color=TXT2),
-            range=[0, 1.05]))
+            title=dict(
+                text='Anomaly Score',
+                font=dict(size=11, color=TXT2)),
+            range=[0, 1.05]),
+        legend=dict(
+            bgcolor='rgba(0,0,0,0)',
+            bordercolor=BORDER,
+            font=dict(size=11)))
     st.plotly_chart(
         fig,
         use_container_width=True,
@@ -1089,6 +1229,9 @@ def render_analysis_results():
     hmac_ok = st.session_state.hmac_ok
     if_ok = st.session_state.if_ok
     chain_intact = st.session_state.chain_intact
+
+    if st.session_state.baseline_mismatch:
+        st.warning(st.session_state.baseline_warning)
 
     vt_desc = {
         "COMPROMISED": (
@@ -1511,6 +1654,7 @@ with st.sidebar:
     pages = [
         ("Dashboard", "Overview and KPIs"),
         ("Analysis", "Run file analysis"),
+        ("Threat Overview", "Threat panels and graph"),
         ("Findings", "Forensic findings"),
         ("Report", "Export report"),
         ("Live Monitor", "Real-time mode"),
@@ -1591,9 +1735,6 @@ if page == 'Dashboard':
 <div class="top-bar">
     <div class="top-bar-title">
         Dashboard
-        <span class="demo-badge">
-            {'Live' if done else 'Demo'}
-        </span>
     </div>
     <div class="top-bar-meta">
         <div class="live-pill">
@@ -1634,6 +1775,9 @@ if page == 'Dashboard':
         vc = DEMO['verdict_color']
         vclass = DEMO['verdict_class']
         total = DEMO['total']
+
+    if done and st.session_state.baseline_mismatch:
+        st.warning(st.session_state.baseline_warning)
 
     # KPI GRID - order: 1 4 3 2 5 7 6 8
     # 1=Total Events 4=Critical 3=AI Anomalies
@@ -1820,7 +1964,7 @@ if page == 'Dashboard':
             fig.update_layout(
                 **make_chart_layout(320),
                 title=dict(
-                    text='Event Timeline (Demo)',
+                    text='Event Timeline',
                     font=dict(
                         size=13, color=TXT1)))
             st.plotly_chart(
@@ -1890,7 +2034,7 @@ elif page == 'Analysis':
         unsafe_allow_html=True)
     st.caption(
         "Accepted: .csv  |  "
-        "Maximum: 50 MB  |  "
+        "Maximum: 150 MB  |  "
         "Processed in memory, never stored")
 
     uploaded = st.file_uploader(
@@ -1915,9 +2059,11 @@ elif page == 'Analysis':
 </div>""", unsafe_allow_html=True)
 
     if uploaded is not None:
-        if uploaded.size > 50 * 1024 * 1024:
+        if uploaded.size > MAX_FILE_SIZE:
             st.error(
-                "File exceeds 50 MB limit.")
+                "This file exceeds the 150 MB upload limit. "
+                "Please split your log export into smaller "
+                "CSV files and upload them separately.")
             st.stop()
 
         file_bytes = uploaded.getvalue()
@@ -1938,6 +2084,57 @@ elif page == 'Analysis':
 
     if st.session_state.analysis_done:
         render_analysis_results()
+
+    st.markdown('</div>', unsafe_allow_html=True)
+
+# -- PAGE: THREAT OVERVIEW --
+elif page == 'Threat Overview':
+
+    st.markdown(f"""
+<div class="top-bar">
+    <div class="top-bar-title">Threat Overview</div>
+    <div class="top-bar-meta">
+        <span>
+            {'Live analysis data'
+             if done else 'Upload a file on Analysis first'}
+        </span>
+    </div>
+</div>
+""", unsafe_allow_html=True)
+
+    st.markdown(
+        '<div class="page-wrap">',
+        unsafe_allow_html=True)
+
+    if not done or not st.session_state.threat_panels:
+        st.info(
+            "No analysis has been run yet. "
+            "Go to Analysis, upload a CSV file, "
+            "then return here for threat panels.")
+    else:
+        theme_tokens = {
+            'bg': BG,
+            'accent': ACCENT,
+            'cyan': CYAN,
+            'success': SUCCESS,
+            'warn': WARN,
+            'border': BORDER,
+            'txt1': TXT1,
+            'txt2': TXT2,
+            'txt3': TXT3,
+            'surface': SURFACE,
+        }
+        render_threat_overview(
+            st.session_state.threat_panels,
+            theme_tokens)
+
+        flagged_json = st.session_state.flagged_preview
+        if flagged_json:
+            from dashboard.utils.threat_render import (
+                render_flagged_events_table)
+            flagged_df = pd.read_json(
+                io.StringIO(flagged_json), orient='split')
+            render_flagged_events_table(flagged_df, theme_tokens)
 
     st.markdown('</div>', unsafe_allow_html=True)
 

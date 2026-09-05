@@ -1,5 +1,5 @@
 """
-parser.py — Parses Windows .evtx files and pre-parsed
+parser.py -- Parses Windows .evtx files and pre-parsed
 CSV files into structured DataFrames for LogShield.
 Input: .evtx file path OR pre-parsed CSV path
 Output: pandas DataFrame with standardized columns
@@ -8,8 +8,87 @@ Time Complexity: O(n), Space Complexity: O(n)
 import pandas as pd
 import numpy as np
 import os
-from typing import Optional
+from typing import Optional, Union
 import xml.etree.ElementTree as ET
+
+MAX_FILE_SIZE = 150 * 1024 * 1024
+CSV_CHUNK_SIZE = 50000
+
+
+def _check_file_size(size_bytes: int) -> None:
+    """
+    Reject files above the upload limit.
+
+    Parameters:
+        size_bytes (int): File size in bytes.
+
+    Time Complexity: O(1)
+    Space Complexity: O(1)
+    """
+    if size_bytes > MAX_FILE_SIZE:
+        raise ValueError(
+            "File exceeds the 150 MB upload limit. "
+            "Please split the log export into smaller "
+            "CSV files and upload them separately.")
+
+
+def _read_csv_in_chunks(source) -> pd.DataFrame:
+    """
+    Read CSV in chunks from a path or buffer.
+
+    Parameters:
+        source: File path or readable buffer.
+
+    Returns:
+        pd.DataFrame: Combined CSV contents.
+
+    Time Complexity: O(n)
+    Space Complexity: O(n)
+    """
+    chunks = []
+    reader = pd.read_csv(
+        source,
+        chunksize=CSV_CHUNK_SIZE,
+        low_memory=False)
+    for chunk in reader:
+        chunks.append(chunk)
+    if not chunks:
+        return pd.DataFrame()
+    return pd.concat(chunks, ignore_index=True)
+
+
+def _standardize_csv_df(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Apply LogShield CSV normalization rules.
+
+    Time Complexity: O(n)
+    Space Complexity: O(n)
+    """
+    df['time_created'] = pd.to_datetime(
+        df['time_created'], utc=True, errors='coerce')
+
+    if 'account_name' in df.columns:
+        df['account_name'] = df['account_name'].fillna('UNKNOWN')
+    else:
+        df['account_name'] = 'UNKNOWN'
+
+    if 'process_name' in df.columns:
+        df['process_name'] = df['process_name'].fillna('UNKNOWN')
+    else:
+        df['process_name'] = 'UNKNOWN'
+
+    if 'event_data' in df.columns:
+        df['event_data'] = df['event_data'].fillna('')
+
+    if 'event_id' in df.columns:
+        df['event_id'] = pd.to_numeric(
+            df['event_id'],
+            errors='coerce').fillna(0).astype(int)
+    else:
+        df['event_id'] = 0
+
+    validate_dataframe(df)
+    return df
 
 def parse_evtx_file(filepath: str,
                     max_records: Optional[int] = None
@@ -38,8 +117,9 @@ def parse_evtx_file(filepath: str,
     if not os.path.exists(safe_path):
         raise FileNotFoundError(f"File not found: {safe_path}")
         
-    if os.path.getsize(safe_path) > 50 * 1024 * 1024:
-        raise ValueError("File exceeds 50MB limit")
+    if os.path.getsize(safe_path) > MAX_FILE_SIZE:
+        raise ValueError(
+            "File exceeds the 150 MB upload limit.")
         
     import Evtx.Evtx as evtx
     
@@ -173,45 +253,12 @@ def parse_csv_file(filepath: str) -> pd.DataFrame:
     # Check file size
     if not os.path.exists(safe_path):
         raise FileNotFoundError(f"File not found: {safe_path}")
-    if os.path.getsize(safe_path) > 50 * 1024 * 1024:
+    if os.path.getsize(safe_path) > MAX_FILE_SIZE:
         raise ValueError(
-            "File exceeds 50MB limit")
-    
-    # Read CSV
-    df = pd.read_csv(safe_path, low_memory=False)
-    
-    # Parse timestamps
-    df['time_created'] = pd.to_datetime(
-        df['time_created'], utc=True, errors='coerce')
-    
-    # Fill nulls
-    if 'account_name' in df.columns:
-        df['account_name'] = (
-            df['account_name'].fillna('UNKNOWN'))
-    else:
-        df['account_name'] = 'UNKNOWN'
+            "File exceeds the 150 MB upload limit.")
 
-    if 'process_name' in df.columns:
-        df['process_name'] = (
-            df['process_name'].fillna('UNKNOWN'))
-    else:
-        df['process_name'] = 'UNKNOWN'
-
-    if 'event_data' in df.columns:
-        df['event_data'] = (
-            df['event_data'].fillna(''))
-    
-    # Ensure event_id is integer
-    if 'event_id' in df.columns:
-        df['event_id'] = pd.to_numeric(
-            df['event_id'],
-            errors='coerce').fillna(0).astype(int)
-    else:
-        df['event_id'] = 0
-    
-    # Validate
-    validate_dataframe(df)
-    
+    df = _read_csv_in_chunks(safe_path)
+    df = _standardize_csv_df(df)
     return df
 
 def parse_csv_from_bytes(file_bytes: bytes
@@ -219,7 +266,7 @@ def parse_csv_from_bytes(file_bytes: bytes
     """
     Parse CSV directly from bytes (no temp file).
     Used by dashboard to avoid Windows file locking.
-    
+
     Args:
         file_bytes: raw bytes from st.file_uploader
     Returns:
@@ -228,33 +275,11 @@ def parse_csv_from_bytes(file_bytes: bytes
     Space Complexity: O(n)
     """
     import io
-    
-    # Read directly from bytes buffer
+
+    _check_file_size(len(file_bytes))
     buffer = io.BytesIO(file_bytes)
-    df = pd.read_csv(buffer, low_memory=False)
-    
-    # Parse timestamps
-    df['time_created'] = pd.to_datetime(
-        df['time_created'], utc=True, errors='coerce')
-    
-    # Fill nulls
-    df['account_name'] = (
-        df['account_name'].fillna('UNKNOWN'))
-    df['process_name'] = (
-        df['process_name'].fillna('UNKNOWN'))
-    if 'event_data' in df.columns:
-        df['event_data'] = (
-            df['event_data'].fillna(''))
-    
-    # Ensure event_id is integer
-    df['event_id'] = pd.to_numeric(
-        df['event_id'],
-        errors='coerce').fillna(0).astype(int)
-    
-    # Validate
-    validate_dataframe(df)
-    
-    return df
+    df = _read_csv_in_chunks(buffer)
+    return _standardize_csv_df(df)
 
 def validate_dataframe(df: pd.DataFrame) -> bool:
     """Validate DataFrame has required columns.

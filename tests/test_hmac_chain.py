@@ -8,8 +8,11 @@ from src.hmac_chain import (
     build_hmac_chain,
     verify_hmac_chain,
     check_chain_continuity,
+    check_baseline_row_count,
+    get_chain_record_count,
     _compute_record_hmac,
     _record_to_content_string)
+from src.features import extract_features
 
 SAMPLE_DATA = pd.DataFrame({
     'event_record_id': [1, 2, 3, 4, 5],
@@ -88,3 +91,28 @@ def test_hmac_changes_with_content():
     h1 = _compute_record_hmac('content_a', 'prev', key)
     h2 = _compute_record_hmac('content_b', 'prev', key)
     assert h1 != h2
+
+
+def test_baseline_mismatch_detects_large_row_gap(tmp_path):
+    chain_path = str(tmp_path / "test_chain.json")
+    build_hmac_chain(SAMPLE_DATA.copy(), chain_path)
+    result = check_baseline_row_count(100, chain_path)
+    assert result['mismatch'] is True
+    assert 'baseline' in result['message'].lower()
+
+
+def test_baseline_match_on_same_row_count(tmp_path):
+    chain_path = str(tmp_path / "test_chain.json")
+    build_hmac_chain(SAMPLE_DATA.copy(), chain_path)
+    result = check_baseline_row_count(len(SAMPLE_DATA), chain_path)
+    assert result['mismatch'] is False
+
+
+def test_chain_count_matches_after_feature_extraction(tmp_path):
+    chain_path = str(tmp_path / "test_chain.json")
+    featured = extract_features(SAMPLE_DATA.copy())
+    build_hmac_chain(featured, chain_path)
+    verified = verify_hmac_chain(
+        extract_features(SAMPLE_DATA.copy()), chain_path)
+    assert int(verified['hmac_flag'].sum()) == 0
+    assert get_chain_record_count(chain_path) == len(SAMPLE_DATA)

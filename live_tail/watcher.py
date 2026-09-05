@@ -1,5 +1,5 @@
 """
-watcher.py — Real-time Windows Event Log monitoring
+watcher.py -- Real-time Windows Event Log monitoring
 for LogShield using Python watchdog library.
 Target detection latency: under 500ms.
 """

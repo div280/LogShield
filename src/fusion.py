@@ -1,5 +1,5 @@
 """
-fusion.py — Combines Isolation Forest, LSTM, and
+fusion.py -- Combines Isolation Forest, LSTM, and
 Autoencoder scores into unified integrity score.
 Score: 100=clean, 0=completely tampered.
 """

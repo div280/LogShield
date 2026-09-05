@@ -39,61 +39,70 @@ SAMPLE_DATA = pd.concat(
     [normal_rows, attack_rows],
     ignore_index=True)
 
-def test_model_trains_without_error():
+def test_model_trains_without_error(tmp_path):
+    model_path = str(tmp_path / "isolation_forest.pkl")
     model = train_isolation_forest(
-        SAMPLE_DATA, random_state=42)
+        SAMPLE_DATA, random_state=42, model_save_path=model_path)
     assert model is not None
 
-def test_model_pkl_file_created():
-    train_isolation_forest(SAMPLE_DATA, random_state=42)
-    assert os.path.exists(
-        'models_saved/isolation_forest.pkl')
+def test_model_pkl_file_created(tmp_path):
+    model_path = str(tmp_path / "isolation_forest.pkl")
+    train_isolation_forest(
+        SAMPLE_DATA, random_state=42, model_save_path=model_path)
+    assert os.path.exists(model_path)
 
-def test_predictions_add_if_flag_column():
-    train_isolation_forest(SAMPLE_DATA, random_state=42)
+def test_predictions_add_if_flag_column(tmp_path):
+    model_path = str(tmp_path / "isolation_forest.pkl")
+    train_isolation_forest(
+        SAMPLE_DATA, random_state=42, model_save_path=model_path)
     result = predict_anomalies(
-        SAMPLE_DATA.copy(),
-        'models_saved/isolation_forest.pkl')
+        SAMPLE_DATA.copy(), model_path)
     assert 'if_flag' in result.columns
 
-def test_predictions_add_if_score_column():
-    train_isolation_forest(SAMPLE_DATA, random_state=42)
+def test_predictions_add_if_score_column(tmp_path):
+    model_path = str(tmp_path / "isolation_forest.pkl")
+    train_isolation_forest(
+        SAMPLE_DATA, random_state=42, model_save_path=model_path)
     result = predict_anomalies(
-        SAMPLE_DATA.copy(),
-        'models_saved/isolation_forest.pkl')
+        SAMPLE_DATA.copy(), model_path)
     assert 'if_score' in result.columns
 
-def test_if_flag_is_binary():
-    train_isolation_forest(SAMPLE_DATA, random_state=42)
+def test_if_flag_is_binary(tmp_path):
+    model_path = str(tmp_path / "isolation_forest.pkl")
+    train_isolation_forest(
+        SAMPLE_DATA, random_state=42, model_save_path=model_path)
     result = predict_anomalies(
-        SAMPLE_DATA.copy(),
-        'models_saved/isolation_forest.pkl')
+        SAMPLE_DATA.copy(), model_path)
     assert result['if_flag'].isin([0, 1]).all()
 
-def test_if_score_between_0_and_1():
-    train_isolation_forest(SAMPLE_DATA, random_state=42)
+def test_if_score_between_0_and_1(tmp_path):
+    model_path = str(tmp_path / "isolation_forest.pkl")
+    train_isolation_forest(
+        SAMPLE_DATA, random_state=42, model_save_path=model_path)
     result = predict_anomalies(
-        SAMPLE_DATA.copy(),
-        'models_saved/isolation_forest.pkl')
+        SAMPLE_DATA.copy(), model_path)
     assert (result['if_score'] >= 0).all()
     assert (result['if_score'] <= 1).all()
 
-def test_evaluate_returns_all_metrics():
-    train_isolation_forest(SAMPLE_DATA, random_state=42)
+def test_evaluate_returns_all_metrics(tmp_path):
+    model_path = str(tmp_path / "isolation_forest.pkl")
+    train_isolation_forest(
+        SAMPLE_DATA, random_state=42, model_save_path=model_path)
     result = predict_anomalies(
-        SAMPLE_DATA.copy(),
-        'models_saved/isolation_forest.pkl')
+        SAMPLE_DATA.copy(), model_path)
     metrics = evaluate_model(result)
     assert 'precision' in metrics
     assert 'recall' in metrics
     assert 'f1' in metrics
     assert 'confusion_matrix' in metrics
 
-def test_model_detects_obvious_anomalies():
-    train_isolation_forest(SAMPLE_DATA, random_state=42)
+def test_model_detects_obvious_anomalies(tmp_path):
+    model_path = str(tmp_path / "isolation_forest.pkl")
+    train_isolation_forest(
+        SAMPLE_DATA, random_state=42, model_save_path=model_path)
     result = predict_anomalies(
-        SAMPLE_DATA.copy(),
-        'models_saved/isolation_forest.pkl')
+        SAMPLE_DATA.copy(), model_path)
     attack_detected = result[
         result['is_tampered']==1]['if_flag'].sum()
     assert attack_detected > 0
+

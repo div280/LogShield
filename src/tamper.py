@@ -1,5 +1,5 @@
 """
-tamper.py — Simulates 3 types of anti-forensic attacks
+tamper.py -- Simulates 3 types of anti-forensic attacks
 on Windows Event Logs for LogShield dataset generation.
 Increases tampered row ratio from 0.81% to 5-7%.
 """
@@ -15,7 +15,7 @@ def gap_attack(df: pd.DataFrame,
                gap_size: int = 50,
                num_gaps: int = 5,
                random_seed: int = 42) -> pd.DataFrame:
-    """Simulate log deletion — gaps in sequence.
+    """Simulate log deletion -- gaps in sequence.
 
     Parameters:
         df (pd.DataFrame): Input feature-enriched DataFrame.

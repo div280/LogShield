@@ -1,5 +1,5 @@
 """
-lstm_model.py — LSTM sequence model for detecting
+lstm_model.py -- LSTM sequence model for detecting
 broken event sequences in Windows Event Logs.
 Trained on normal log sequences (window size 10).
 Saves to: models_saved/lstm_model.h5

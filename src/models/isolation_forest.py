@@ -1,5 +1,5 @@
 """
-isolation_forest.py — Isolation Forest model for
+isolation_forest.py -- Isolation Forest model for
 detecting temporal gap anomalies in Windows Event Logs.
 Trained on normal logs only (unsupervised).
 Uses log-transformed delta_t for better gap detection.
@@ -27,17 +27,19 @@ FEATURE_COLUMNS = [
 def train_isolation_forest(
         df: pd.DataFrame,
         contamination: float = 0.0666,
-        random_state: int = 42) -> IsolationForest:
+        random_state: int = 42,
+        model_save_path: str = 'models_saved/isolation_forest.pkl') -> IsolationForest:
     """
     Train Isolation Forest on normal log rows only.
 
-    Args:
-        df: DataFrame with feature columns and is_tampered
-        contamination: expected anomaly ratio (match dataset)
-        random_state: for reproducibility
+    Parameters:
+        df (pd.DataFrame): DataFrame with feature columns and is_tampered.
+        contamination (float): Expected anomaly ratio (match dataset).
+        random_state (int): Random seed for reproducibility.
+        model_save_path (str): Filepath to save the trained model .pkl.
 
     Returns:
-        Trained IsolationForest model
+        IsolationForest: Trained IsolationForest model.
 
     Time Complexity: O(n log n)
     Space Complexity: O(n)
@@ -57,13 +59,14 @@ def train_isolation_forest(
     )
     model.fit(X_train)
 
-    os.makedirs('models_saved', exist_ok=True)
-    joblib.dump(model, 'models_saved/isolation_forest.pkl')
+    dir_name = os.path.dirname(model_save_path)
+    os.makedirs(dir_name if dir_name else 'models_saved', exist_ok=True)
+    joblib.dump(model, model_save_path)
 
     print(f"Trained on {len(normal_df):,} normal rows")
     print(f"Features: {list(X_train.columns)}")
     print(f"Contamination: {contamination}")
-    print(f"Saved to models_saved/isolation_forest.pkl")
+    print(f"Saved to {model_save_path}")
 
     return model
 

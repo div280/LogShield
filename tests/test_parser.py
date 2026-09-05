@@ -88,3 +88,15 @@ def test_parse_csv_from_bytes():
     assert result['account_name'].isnull().sum() == 0
     assert result['process_name'].isnull().sum() == 0
 
+
+def test_oversized_bytes_rejected():
+    from src.parser import MAX_FILE_SIZE, parse_csv_from_bytes
+    too_large = b'x' * (MAX_FILE_SIZE + 1)
+    with pytest.raises(ValueError, match='150 MB'):
+        parse_csv_from_bytes(too_large)
+
+
+def test_max_file_size_is_150mb():
+    from src.parser import MAX_FILE_SIZE
+    assert MAX_FILE_SIZE == 150 * 1024 * 1024
+

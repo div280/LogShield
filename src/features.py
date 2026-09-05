@@ -1,7 +1,7 @@
 """
-features.py — Extracts 8 ML features from parsed
+features.py -- Extracts 8 ML features from parsed
 Windows Event Log DataFrame for LogShield models.
-Time Complexity: O(n), Space Complexity: O(1) per row
+Time Complexity: O(n log n), Space Complexity: O(1) per row
 """
 import pandas as pd
 import numpy as np
@@ -21,7 +21,7 @@ def extract_features(df: pd.DataFrame) -> pd.DataFrame:
     Returns:
         pd.DataFrame: DataFrame with the 8 added ML feature columns.
 
-    Time Complexity: O(n)
+    Time Complexity: O(n log n)
     Space Complexity: O(1) per row
     """
     try:
@@ -38,12 +38,10 @@ def extract_features(df: pd.DataFrame) -> pd.DataFrame:
         
         # Step 3: Add event_frequency (int)
         times = df['time_created'].values
-        freq = []
-        for i, t in enumerate(times):
-            window_start = t - pd.Timedelta(seconds=60)
-            count = ((times >= window_start) & (times <= t)).sum()
-            freq.append(int(count))
-        df['event_frequency'] = freq
+        window_starts = times - np.timedelta64(60, 's')
+        left_indices = np.searchsorted(times, window_starts, side='left')
+        right_indices = np.searchsorted(times, times, side='right')
+        df['event_frequency'] = (right_indices - left_indices).astype(int)
         
         # Step 4: Add hour_of_day (int)
         df['hour_of_day'] = df['time_created'].dt.hour
@@ -81,3 +79,4 @@ def extract_features(df: pd.DataFrame) -> pd.DataFrame:
     except Exception as e:
         print(f"Error in extract_features: {e}")
         return df
+

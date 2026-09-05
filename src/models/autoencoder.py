@@ -1,5 +1,5 @@
 """
-autoencoder.py — Autoencoder for detecting injection
+autoencoder.py -- Autoencoder for detecting injection
 attacks via reconstruction error in Windows Event Logs.
 Trained on normal log feature vectors.
 Saves to: models_saved/autoencoder.h5

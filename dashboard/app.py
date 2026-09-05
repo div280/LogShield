@@ -14,6 +14,8 @@ import os
 import sys
 import json
 import time
+import hashlib
+import io
 import requests
 from datetime import datetime
 sys.path.insert(0, '.')
@@ -40,10 +42,14 @@ if 'page' not in st.session_state:
     st.session_state.page = 'Dashboard'
 if 'analysis_done' not in st.session_state:
     st.session_state.analysis_done = False
-if 'df_result' not in st.session_state:
-    st.session_state.df_result = None
+if 'uploaded_bytes' not in st.session_state:
+    st.session_state.uploaded_bytes = None
+if 'upload_fingerprint' not in st.session_state:
+    st.session_state.upload_fingerprint = None
 if 'verdict' not in st.session_state:
     st.session_state.verdict = None
+if 'total_events' not in st.session_state:
+    st.session_state.total_events = 0
 if 'deleted_count' not in st.session_state:
     st.session_state.deleted_count = 0
 if 'injected_count' not in st.session_state:
@@ -56,6 +62,18 @@ if 'findings' not in st.session_state:
     st.session_state.findings = []
 if 'analysis_time' not in st.session_state:
     st.session_state.analysis_time = None
+if 'hmac_ok' not in st.session_state:
+    st.session_state.hmac_ok = False
+if 'if_ok' not in st.session_state:
+    st.session_state.if_ok = False
+if 'chain_intact' not in st.session_state:
+    st.session_state.chain_intact = True
+if 'timeline_data' not in st.session_state:
+    st.session_state.timeline_data = None
+if 'process_chart' not in st.session_state:
+    st.session_state.process_chart = []
+if 'flagged_preview' not in st.session_state:
+    st.session_state.flagged_preview = None
 
 dm = st.session_state.dark_mode
 
@@ -820,17 +838,513 @@ def geolocate_ips(ip_list):
     return locations
 
 
-def get_verdict(hmac_bad, deleted, injected,
-                anomalies, critical, total):
+def get_verdict(deleted, injected, anomalies,
+                critical, total):
     if deleted > 0 or injected > 0:
         return "COMPROMISED", "compromised", "red"
-    if hmac_bad and deleted == 0:
-        # HMAC flagged but no actual deletions
-        # means minor HMAC mismatch not deletion
-        pass
     if critical > 0 or anomalies > total * 0.02:
         return "SUSPICIOUS", "suspicious", "amber"
     return "CLEAN", "clean", "green"
+
+
+def _file_fingerprint(file_bytes):
+    return hashlib.sha256(file_bytes).hexdigest()
+
+
+def _build_timeline_data(df):
+    if ('if_score' not in df.columns or
+            'time_created' not in df.columns or
+            'if_flag' not in df.columns):
+        return None
+    norm = df[df['if_flag'] == 0]
+    anom = df[df['if_flag'] == 1]
+    return {
+        'norm_times': (
+            norm['time_created'].astype(str).tolist()),
+        'norm_scores': (
+            norm['if_score'].astype(float).tolist()),
+        'anom_times': (
+            anom['time_created'].astype(str).tolist()),
+        'anom_scores': (
+            anom['if_score'].astype(float).tolist()),
+        'norm_count': int(len(norm)),
+        'anom_count': int(len(anom)),
+    }
+
+
+def _build_process_chart(df):
+    if 'process_name' not in df.columns:
+        return []
+    tools = ['wevtutil', 'whoami', 'net.exe', 'runas',
+             'cmd.exe', 'powershell', 'psexec']
+    mask = df['process_name'].str.lower().str.contains(
+        '|'.join(tools), na=False)
+    sus = df[mask]
+    if len(sus) == 0:
+        return []
+    counts = (sus['process_name']
+              .value_counts().head(8))
+    return [
+        {'process': k, 'count': int(v)}
+        for k, v in counts.items()]
+
+
+def _build_flagged_preview(df):
+    if 'if_flag' not in df.columns:
+        return None
+    flagged = df[df['if_flag'] == 1]
+    if len(flagged) == 0:
+        return None
+    show_cols = [
+        c for c in [
+            'time_created', 'event_id', 'account_name',
+            'process_name', 'is_critical_event', 'if_score'
+        ] if c in flagged.columns]
+    preview = (
+        flagged[show_cols]
+        .sort_values('if_score', ascending=False)
+        .head(100))
+    return preview.to_json(orient='split')
+
+
+def run_analysis_pipeline(file_bytes):
+    """Run full analysis pipeline on uploaded bytes."""
+    df = parse_csv_from_bytes(file_bytes)
+    df = extract_features(df)
+
+    CHAIN = 'models_saved/hmac_chain.json'
+    hmac_ok = os.path.exists(CHAIN)
+    deleted = 0
+    injected = 0
+    chain_intact = True
+    if hmac_ok:
+        try:
+            df = verify_hmac_chain(df, CHAIN)
+            c = check_chain_continuity(df, CHAIN)
+            deleted = c['missing_records']
+            injected = c['extra_records']
+            chain_intact = (
+                not c['gap_detected'] and
+                not c['injection_detected'])
+        except Exception:
+            hmac_ok = False
+            chain_intact = False
+
+    IF = 'models_saved/isolation_forest.pkl'
+    if_ok = os.path.exists(IF)
+    anomalies = 0
+    critical = 0
+    if if_ok:
+        try:
+            df = predict_anomalies(df, IF)
+            anomalies = int(df['if_flag'].sum())
+            critical = int(
+                df['is_critical_event'].sum()
+                if 'is_critical_event' in df.columns
+                else 0)
+        except Exception:
+            if_ok = False
+
+    total = len(df)
+    verdict, vclass, vc = get_verdict(
+        deleted, injected, anomalies, critical, total)
+    findings = build_findings(
+        df, deleted, injected, critical, anomalies)
+
+    return {
+        'df': df,
+        'total_events': total,
+        'deleted': deleted,
+        'injected': injected,
+        'anomalies': anomalies,
+        'critical': critical,
+        'verdict': verdict,
+        'vclass': vclass,
+        'vc': vc,
+        'findings': findings,
+        'hmac_ok': hmac_ok,
+        'if_ok': if_ok,
+        'chain_intact': chain_intact,
+        'timeline_data': _build_timeline_data(df),
+        'process_chart': _build_process_chart(df),
+        'flagged_preview': _build_flagged_preview(df),
+    }
+
+
+def save_analysis_to_session(result, file_bytes):
+    """Persist primitive analysis results in session."""
+    st.session_state.analysis_done = True
+    st.session_state.uploaded_bytes = file_bytes
+    st.session_state.upload_fingerprint = (
+        _file_fingerprint(file_bytes))
+    st.session_state.total_events = result['total_events']
+    st.session_state.verdict = result['verdict']
+    st.session_state.deleted_count = result['deleted']
+    st.session_state.injected_count = result['injected']
+    st.session_state.anomaly_count = result['anomalies']
+    st.session_state.critical_count = result['critical']
+    st.session_state.findings = result['findings']
+    st.session_state.hmac_ok = result['hmac_ok']
+    st.session_state.if_ok = result['if_ok']
+    st.session_state.chain_intact = result['chain_intact']
+    st.session_state.timeline_data = result['timeline_data']
+    st.session_state.process_chart = result['process_chart']
+    st.session_state.flagged_preview = (
+        result['flagged_preview'])
+    st.session_state.analysis_time = (
+        datetime.utcnow().strftime(
+            "%Y-%m-%d %H:%M:%S UTC"))
+
+
+def render_timeline_chart(timeline_data, height=340):
+    """Render event timeline from cached primitive data."""
+    if not timeline_data:
+        return
+    norm_count = timeline_data['norm_count']
+    anom_count = timeline_data['anom_count']
+    fig = go.Figure()
+    if norm_count > 0:
+        fig.add_trace(go.Scattergl(
+            x=timeline_data['norm_times'],
+            y=timeline_data['norm_scores'],
+            mode='markers',
+            name=f'Normal ({norm_count:,})',
+            marker=dict(
+                color=SUCCESS,
+                size=3,
+                opacity=0.4),
+            hovertemplate=(
+                'Time: %{x}<br>'
+                'Score: %{y:.3f}'
+                '<extra>Normal</extra>')))
+    if anom_count > 0:
+        fig.add_trace(go.Scattergl(
+            x=timeline_data['anom_times'],
+            y=timeline_data['anom_scores'],
+            mode='markers',
+            name=f'Anomaly ({anom_count:,})',
+            marker=dict(
+                color=ACCENT,
+                size=10,
+                symbol='diamond',
+                line=dict(
+                    color='rgba(255,255,255,0.3)',
+                    width=1)),
+            hovertemplate=(
+                'Time: %{x}<br>'
+                'Score: %{y:.3f}'
+                '<extra>ANOMALY</extra>')))
+    fig.add_hline(
+        y=0.5,
+        line=dict(color=WARN, width=1, dash='dash'),
+        annotation=dict(
+            text='Detection threshold',
+            font=dict(color=WARN, size=10),
+            xref='paper',
+            x=1))
+    fig.update_layout(
+        **make_chart_layout(height),
+        title=dict(
+            text=(
+                f'Event Timeline  '
+                f'{norm_count:,} normal  '
+                f'{anom_count:,} anomalies'),
+            font=dict(
+                size=13,
+                color=TXT1,
+                family='Inter')),
+        xaxis=dict(
+            gridcolor=BORDER,
+            linecolor=BORDER,
+            title='Time',
+            titlefont=dict(size=11, color=TXT2)),
+        yaxis=dict(
+            gridcolor=BORDER,
+            linecolor=BORDER,
+            title='Anomaly Score',
+            titlefont=dict(size=11, color=TXT2),
+            range=[0, 1.05]))
+    st.plotly_chart(
+        fig,
+        use_container_width=True,
+        config={'displayModeBar': False})
+
+
+def render_analysis_results():
+    """Render full analysis output from session state."""
+    verdict = st.session_state.verdict
+    vclass = (
+        "compromised" if verdict == "COMPROMISED"
+        else "suspicious" if verdict == "SUSPICIOUS"
+        else "clean")
+    vc = (
+        "red" if verdict == "COMPROMISED"
+        else "amber" if verdict == "SUSPICIOUS"
+        else "green")
+    total = st.session_state.total_events
+    deleted = st.session_state.deleted_count
+    injected = st.session_state.injected_count
+    anomalies = st.session_state.anomaly_count
+    critical = st.session_state.critical_count
+    hmac_ok = st.session_state.hmac_ok
+    if_ok = st.session_state.if_ok
+    chain_intact = st.session_state.chain_intact
+
+    vt_desc = {
+        "COMPROMISED": (
+            f"Confirmed evidence of deliberate "
+            f"log manipulation. {deleted} records "
+            f"deleted. This file cannot be used "
+            f"as reliable evidence without "
+            f"further investigation."),
+        "SUSPICIOUS": (
+            "Anomalous patterns detected "
+            "inconsistent with normal system "
+            "behavior. Manual review recommended."),
+        "CLEAN": (
+            "Cryptographic chain intact. "
+            "No significant anomalies detected. "
+            "Log file appears authentic.")
+    }
+    st.markdown(f"""
+<div class="verdict-banner {vclass}">
+    <div>
+        <div class="verdict-title {vc}">
+            INTEGRITY {verdict}
+        </div>
+        <div class="verdict-sub">
+            {vt_desc.get(verdict, '')}
+        </div>
+    </div>
+    <div class="confidence-badge {vc}">
+        HIGH CONFIDENCE
+    </div>
+</div>
+""", unsafe_allow_html=True)
+
+    chain_val = "PASS" if chain_intact else "FAIL"
+    chain_col = "green" if chain_intact else "red"
+    conf_val = (
+        "HIGH" if verdict == "CLEAN" else "MEDIUM")
+
+    st.markdown(f"""
+<div class="kpi-row" style="margin-top:16px">
+    <div class="kpi-card cyan">
+        <div class="kpi-val cyan">{total:,}</div>
+        <div class="kpi-label">Total Events</div>
+        <div class="kpi-delta neutral">Analyzed</div>
+    </div>
+    <div class="kpi-card
+        {'accent' if critical>0 else 'success'}">
+        <div class="kpi-val
+            {'red' if critical>0 else 'green'}">
+            {critical:,}
+        </div>
+        <div class="kpi-label">Critical Events</div>
+        <div class="kpi-delta
+            {'bad' if critical>0 else 'ok'}">
+            {'1102 / 4719 detected'
+             if critical>0 else 'None detected'}
+        </div>
+    </div>
+    <div class="kpi-card
+        {'warn' if anomalies>0 else 'success'}">
+        <div class="kpi-val
+            {'amber' if anomalies>0 else 'green'}">
+            {anomalies:,}
+        </div>
+        <div class="kpi-label">AI Anomalies</div>
+        <div class="kpi-delta
+            {'bad' if anomalies>0 else 'ok'}">
+            {'Flagged' if anomalies>0 else 'Clean'}
+        </div>
+    </div>
+    <div class="kpi-card
+        {'accent' if deleted>0 else 'success'}">
+        <div class="kpi-val
+            {'red' if deleted>0 else 'green'}">
+            {deleted:,}
+        </div>
+        <div class="kpi-label">Deleted Records</div>
+        <div class="kpi-delta
+            {'bad' if deleted>0 else 'ok'}">
+            {'Confirmed' if deleted>0 else 'None'}
+        </div>
+    </div>
+</div>
+<div class="kpi-row">
+    <div class="kpi-card
+        {'accent' if chain_val=='FAIL'
+         else 'success'}">
+        <div class="kpi-val {chain_col}">
+            {chain_val}
+        </div>
+        <div class="kpi-label">Chain Status</div>
+        <div class="kpi-delta
+            {'bad' if chain_val=='FAIL' else 'ok'}">
+            HMAC-SHA256
+        </div>
+    </div>
+    <div class="kpi-card cyan">
+        <div class="kpi-val cyan">{conf_val}</div>
+        <div class="kpi-label">Confidence</div>
+        <div class="kpi-delta neutral">
+            Detection certainty
+        </div>
+    </div>
+    <div class="kpi-card">
+        <div class="kpi-val">2</div>
+        <div class="kpi-label">Active Layers</div>
+        <div class="kpi-delta neutral">of 4 total</div>
+    </div>
+    <div class="kpi-card
+        {'accent' if verdict != 'CLEAN' else 'success'}">
+        <div class="kpi-val {vc}">{verdict}</div>
+        <div class="kpi-label">Verdict</div>
+        <div class="kpi-delta neutral">
+            Overall assessment
+        </div>
+    </div>
+</div>
+""", unsafe_allow_html=True)
+
+    st.markdown(
+        '<div class="sec-label">'
+        'Detection Results</div>',
+        unsafe_allow_html=True)
+
+    l1c = 'red' if not chain_intact else (
+        'green' if hmac_ok else 'grey')
+    l1s = ('COMPROMISED' if not chain_intact else
+           'INTACT' if hmac_ok else 'UNAVAILABLE')
+    l1d = (
+        f'{deleted} deleted, {injected} injected'
+        if hmac_ok else
+        'Chain file not found')
+    l2c = ('amber' if anomalies > 0 else
+           'green' if if_ok else 'grey')
+    l2s = ('ANOMALIES DETECTED'
+           if anomalies > 0 else
+           'NORMAL' if if_ok else 'UNAVAILABLE')
+    l2d = (
+        f'{anomalies} events flagged'
+        if anomalies > 0 else
+        'No anomalies' if if_ok else
+        'Model not loaded')
+
+    st.markdown(f"""
+<div class="layers-panel">
+    <div class="layer-row">
+        <div class="layer-bar {l1c}"></div>
+        <div>
+            <div class="layer-name">
+                Layer 1 - HMAC-SHA256 Chain
+            </div>
+            <div class="layer-status {l1c}">
+                {l1s}
+            </div>
+            <div class="layer-detail">
+                {l1d} - Mathematical certainty
+            </div>
+        </div>
+    </div>
+    <div class="layer-row">
+        <div class="layer-bar {l2c}"></div>
+        <div>
+            <div class="layer-name">
+                Layer 2a - Isolation Forest
+            </div>
+            <div class="layer-status {l2c}">
+                {l2s}
+            </div>
+            <div class="layer-detail">{l2d}</div>
+        </div>
+    </div>
+    <div class="layer-row">
+        <div class="layer-bar grey"></div>
+        <div>
+            <div class="layer-name">
+                Layer 2b - LSTM Sequence Model
+            </div>
+            <div class="layer-status grey">
+                PENDING
+            </div>
+            <div class="layer-detail">
+                Requires expanded dataset
+            </div>
+        </div>
+    </div>
+    <div class="layer-row">
+        <div class="layer-bar grey"></div>
+        <div>
+            <div class="layer-name">
+                Layer 2c - Autoencoder
+            </div>
+            <div class="layer-status grey">
+                PENDING
+            </div>
+            <div class="layer-detail">
+                Requires expanded dataset
+            </div>
+        </div>
+    </div>
+</div>
+""", unsafe_allow_html=True)
+
+    timeline = st.session_state.timeline_data
+    if timeline:
+        st.markdown(
+            '<div class="sec-label">'
+            'Event Timeline</div>',
+            unsafe_allow_html=True)
+        render_timeline_chart(timeline, height=340)
+        st.caption(
+            "Green dots: normal events  "
+            "Red diamonds: anomalies  "
+            "Dashed line: detection threshold")
+
+    process_chart = st.session_state.process_chart
+    if process_chart:
+        st.markdown(
+            '<div class="sec-label">'
+            'Process Activity</div>',
+            unsafe_allow_html=True)
+        pc = pd.DataFrame(process_chart)
+        bar = go.Figure(go.Bar(
+            x=pc['count'],
+            y=pc['process'],
+            orientation='h',
+            marker=dict(
+                color=ACCENT,
+                opacity=0.8,
+                line=dict(width=0))))
+        bar.update_layout(**make_chart_layout(280))
+        st.plotly_chart(
+            bar,
+            use_container_width=True,
+            config={'displayModeBar': False})
+
+    preview_json = st.session_state.flagged_preview
+    if preview_json:
+        flagged = pd.read_json(
+            io.StringIO(preview_json), orient='split')
+        st.markdown(
+            f'<div class="sec-label">'
+            f'Flagged Events '
+            f'({st.session_state.anomaly_count:,})'
+            f'</div>',
+            unsafe_allow_html=True)
+        st.dataframe(
+            flagged,
+            use_container_width=True,
+            hide_index=True)
+
+    st.markdown(
+        '<div style="margin-top:8px">'
+        'Go to the Report page to download '
+        'the full forensic report.'
+        '</div>',
+        unsafe_allow_html=True)
 
 
 def build_findings(df, deleted, injected,
@@ -1110,9 +1624,7 @@ if page == 'Dashboard':
             "compromised" if vt == "COMPROMISED"
             else "suspicious" if vt == "SUSPICIOUS"
             else "clean")
-        total = len(
-            st.session_state.df_result
-        ) if st.session_state.df_result is not None else 0
+        total = st.session_state.total_events
     else:
         tv = DEMO['total']
         dv = DEMO['deleted']
@@ -1180,7 +1692,7 @@ if page == 'Dashboard':
 
     # Second row of KPIs
     chain_val = (
-        "FAIL" if (done and dv > 0)
+        "FAIL" if (done and not st.session_state.chain_intact)
         else "PASS")
     chain_col = (
         "red" if chain_val == "FAIL"
@@ -1278,44 +1790,14 @@ if page == 'Dashboard':
     ch1, ch2 = st.columns([3, 2])
 
     with ch1:
-        # Event timeline or demo
-        if done and st.session_state.df_result is not None:
-            df_r = st.session_state.df_result
-            if ('if_score' in df_r.columns and
-                    'time_created' in df_r.columns):
-                norm = df_r[df_r['if_flag'] == 0]
-                anom = df_r[df_r['if_flag'] == 1]
-                fig = go.Figure()
-                fig.add_trace(go.Scattergl(
-                    x=norm['time_created'],
-                    y=norm['if_score'],
-                    mode='markers',
-                    name='Normal',
-                    marker=dict(
-                        color=SUCCESS,
-                        size=3,
-                        opacity=0.5)))
-                if len(anom) > 0:
-                    fig.add_trace(go.Scattergl(
-                        x=anom['time_created'],
-                        y=anom['if_score'],
-                        mode='markers',
-                        name='Anomaly',
-                        marker=dict(
-                            color=ACCENT,
-                            size=8,
-                            symbol='diamond')))
-                fig.update_layout(
-                    **make_chart_layout(320),
-                    title=dict(
-                        text='Event Timeline',
-                        font=dict(
-                            size=13,
-                            color=TXT1)))
-                st.plotly_chart(
-                    fig,
-                    use_container_width=True,
-                    config={'displayModeBar': False})
+        if done and st.session_state.timeline_data:
+            st.markdown(
+                '<div class="sec-label">'
+                'Event Timeline</div>',
+                unsafe_allow_html=True)
+            render_timeline_chart(
+                st.session_state.timeline_data,
+                height=320)
         else:
             # Demo chart
             t = pd.date_range(
@@ -1416,7 +1898,7 @@ elif page == 'Analysis':
         type=['csv'],
         label_visibility="collapsed")
 
-    if uploaded is None:
+    if uploaded is None and not done:
         st.markdown(f"""
 <div style="
     text-align:center;
@@ -1438,478 +1920,24 @@ elif page == 'Analysis':
                 "File exceeds 50 MB limit.")
             st.stop()
 
-        with st.spinner(
-                "Running integrity analysis..."):
-            try:
-                df = parse_csv_from_bytes(
-                    uploaded.getvalue())
-                df = extract_features(df)
-            except Exception as e:
-                st.error(
-                    "Analysis failed. Verify file "
-                    f"format. Detail: {str(e)}")
-                st.stop()
+        file_bytes = uploaded.getvalue()
+        fingerprint = _file_fingerprint(file_bytes)
+        if fingerprint != st.session_state.upload_fingerprint:
+            with st.spinner(
+                    "Running integrity analysis..."):
+                try:
+                    result = run_analysis_pipeline(
+                        file_bytes)
+                    save_analysis_to_session(
+                        result, file_bytes)
+                except Exception as e:
+                    st.error(
+                        "Analysis failed. Verify file "
+                        f"format. Detail: {str(e)}")
+                    st.stop()
 
-        # HMAC
-        CHAIN = 'models_saved/hmac_chain.json'
-        hmac_ok = os.path.exists(CHAIN)
-        hmac_bad = False
-        deleted = 0
-        injected = 0
-        if hmac_ok:
-            try:
-                df = verify_hmac_chain(df, CHAIN)
-                c = check_chain_continuity(
-                    df, CHAIN)
-                hmac_bad = (
-                    df['hmac_flag'].sum() > 0 or
-                    c['gap_detected'] or
-                    c['injection_detected'])
-                deleted = c['missing_records']
-                injected = c['extra_records']
-            except Exception:
-                hmac_ok = False
-
-        # IF
-        IF = 'models_saved/isolation_forest.pkl'
-        if_ok = os.path.exists(IF)
-        anomalies = 0
-        critical = 0
-        if if_ok:
-            try:
-                df = predict_anomalies(df, IF)
-                anomalies = int(
-                    df['if_flag'].sum())
-                critical = int(
-                    df['is_critical_event'].sum()
-                    if 'is_critical_event'
-                    in df.columns else 0)
-            except Exception:
-                if_ok = False
-
-        verdict, vclass, vc = get_verdict(
-            hmac_bad, deleted, injected,
-            anomalies, critical, len(df))
-
-        findings = build_findings(
-            df, deleted, injected,
-            critical, anomalies)
-
-        # Save to session
-        st.session_state.analysis_done = True
-        st.session_state.df_result = df
-        st.session_state.verdict = verdict
-        st.session_state.deleted_count = deleted
-        st.session_state.injected_count = injected
-        st.session_state.anomaly_count = anomalies
-        st.session_state.critical_count = critical
-        st.session_state.findings = findings
-        st.session_state.analysis_time = (
-            datetime.utcnow().strftime(
-                "%Y-%m-%d %H:%M:%S UTC"))
-
-        # Show verdict
-        vt_desc = {
-            "COMPROMISED": (
-                f"Confirmed evidence of deliberate "
-                f"log manipulation. {deleted} records "
-                f"deleted. This file cannot be used "
-                f"as reliable evidence without "
-                f"further investigation."),
-            "SUSPICIOUS": (
-                "Anomalous patterns detected "
-                "inconsistent with normal behavior. "
-                "Manual review recommended."),
-            "CLEAN": (
-                "Cryptographic chain intact. "
-                "No significant anomalies detected. "
-                "Log file appears authentic.")
-        }
-        st.markdown(f"""
-<div class="verdict-banner {vclass}">
-    <div>
-        <div class="verdict-title {vc}">
-            INTEGRITY {verdict}
-        </div>
-        <div class="verdict-sub">
-            {vt_desc.get(verdict, '')}
-        </div>
-    </div>
-    <div class="confidence-badge {vc}">
-        HIGH CONFIDENCE
-    </div>
-</div>
-""", unsafe_allow_html=True)
-
-        # Metrics
-        st.markdown(f"""
-<div class="kpi-row" style="margin-top:16px">
-    <div class="kpi-card cyan">
-        <div class="kpi-val cyan">{len(df):,}</div>
-        <div class="kpi-label">Total Events</div>
-        <div class="kpi-delta neutral">Analyzed</div>
-    </div>
-    <div class="kpi-card
-        {'accent' if deleted>0 else 'success'}">
-        <div class="kpi-val
-            {'red' if deleted>0 else 'green'}">
-            {deleted:,}
-        </div>
-        <div class="kpi-label">Deleted Records</div>
-        <div class="kpi-delta
-            {'bad' if deleted>0 else 'ok'}">
-            {'Confirmed' if deleted>0 else 'None'}
-        </div>
-    </div>
-    <div class="kpi-card
-        {'warn' if anomalies>0 else 'success'}">
-        <div class="kpi-val
-            {'amber' if anomalies>0 else 'green'}">
-            {anomalies:,}
-        </div>
-        <div class="kpi-label">AI Anomalies</div>
-        <div class="kpi-delta
-            {'bad' if anomalies>0 else 'ok'}">
-            {'Flagged' if anomalies>0 else 'Clean'}
-        </div>
-    </div>
-    <div class="kpi-card
-        {'accent' if critical>0 else 'success'}">
-        <div class="kpi-val
-            {'red' if critical>0 else 'green'}">
-            {critical:,}
-        </div>
-        <div class="kpi-label">Critical Events</div>
-        <div class="kpi-delta
-            {'bad' if critical>0 else 'ok'}">
-            {'1102/4719' if critical>0 else 'None'}
-        </div>
-    </div>
-</div>
-""", unsafe_allow_html=True)
-
-        # Layer status
-        st.markdown(
-            '<div class="sec-label">'
-            'Detection Results</div>',
-            unsafe_allow_html=True)
-
-        l1c = 'red' if hmac_bad else (
-            'green' if hmac_ok else 'grey')
-        l1s = ('COMPROMISED' if hmac_bad else
-               'INTACT' if hmac_ok else 'UNAVAILABLE')
-        l1d = (
-            f'{deleted} records deleted, '
-            f'{injected} injected'
-            if hmac_bad else
-            'Chain fully verified'
-            if hmac_ok else
-            'Chain file not found')
-        l2c = ('amber' if anomalies > 0 else
-               'green' if if_ok else 'grey')
-        l2s = ('ANOMALIES DETECTED'
-               if anomalies > 0 else
-               'NORMAL' if if_ok else 'UNAVAILABLE')
-        l2d = (
-            f'{anomalies} events flagged'
-            if anomalies > 0 else
-            'No anomalies' if if_ok else
-            'Model not loaded')
-
-        st.markdown(f"""
-<div class="layers-panel">
-    <div class="layer-row">
-        <div class="layer-bar {l1c}"></div>
-        <div>
-            <div class="layer-name">
-                Layer 1 - HMAC-SHA256 Chain
-            </div>
-            <div class="layer-status {l1c}">
-                {l1s}
-            </div>
-            <div class="layer-detail">
-                {l1d} - Mathematical certainty
-            </div>
-        </div>
-    </div>
-    <div class="layer-row">
-        <div class="layer-bar {l2c}"></div>
-        <div>
-            <div class="layer-name">
-                Layer 2a - Isolation Forest
-            </div>
-            <div class="layer-status {l2c}">
-                {l2s}
-            </div>
-            <div class="layer-detail">{l2d}</div>
-        </div>
-    </div>
-    <div class="layer-row">
-        <div class="layer-bar grey"></div>
-        <div>
-            <div class="layer-name">
-                Layer 2b - LSTM Sequence Model
-            </div>
-            <div class="layer-status grey">
-                PENDING
-            </div>
-            <div class="layer-detail">
-                Requires expanded dataset
-            </div>
-        </div>
-    </div>
-    <div class="layer-row">
-        <div class="layer-bar grey"></div>
-        <div>
-            <div class="layer-name">
-                Layer 2c - Autoencoder
-            </div>
-            <div class="layer-status grey">
-                PENDING
-            </div>
-            <div class="layer-detail">
-                Requires expanded dataset
-            </div>
-        </div>
-    </div>
-</div>
-""", unsafe_allow_html=True)
-
-        # Timeline
-        if ('if_score' in df.columns and
-                'time_created' in df.columns):
-            st.markdown(
-                '<div class="sec-label">'
-                'Event Timeline</div>',
-                unsafe_allow_html=True)
-
-            norm = df[df['if_flag'] == 0]
-            anom = df[df['if_flag'] == 1]
-
-            fig = go.Figure()
-
-            # Normal events as small dots
-            fig.add_trace(go.Scattergl(
-                x=norm['time_created'],
-                y=norm['if_score'],
-                mode='markers',
-                name=f'Normal ({len(norm):,})',
-                marker=dict(
-                    color=SUCCESS,
-                    size=3,
-                    opacity=0.4),
-                hovertemplate=(
-                    'Time: %{x}<br>'
-                    'Score: %{y:.3f}'
-                    '<extra>Normal</extra>')))
-
-            # Anomalies as larger diamonds
-            if len(anom) > 0:
-                fig.add_trace(go.Scattergl(
-                    x=anom['time_created'],
-                    y=anom['if_score'],
-                    mode='markers',
-                    name=f'Anomaly ({len(anom):,})',
-                    marker=dict(
-                        color=ACCENT,
-                        size=10,
-                        symbol='diamond',
-                        line=dict(
-                            color='rgba(255,255,255,0.3)',
-                            width=1)),
-                    hovertemplate=(
-                        'Time: %{x}<br>'
-                        'Score: %{y:.3f}'
-                        '<extra>ANOMALY</extra>')))
-
-            # Add threshold line
-            threshold_y = 0.5
-            fig.add_hline(
-                y=threshold_y,
-                line=dict(
-                    color=WARN,
-                    width=1,
-                    dash='dash'),
-                annotation=dict(
-                    text='Detection threshold',
-                    font=dict(
-                        color=WARN,
-                        size=10),
-                    xref='paper',
-                    x=1))
-
-            fig.update_layout(
-                **make_chart_layout(340),
-                title=dict(
-                    text=(
-                        f'Event Timeline  '
-                        f'{len(norm):,} normal  '
-                        f'{len(anom):,} anomalies'),
-                    font=dict(
-                        size=13,
-                        color=TXT1,
-                        family='Inter')),
-                xaxis=dict(
-                    gridcolor=BORDER,
-                    linecolor=BORDER,
-                    title='Time',
-                    titlefont=dict(
-                        size=11, color=TXT2)),
-                yaxis=dict(
-                    gridcolor=BORDER,
-                    linecolor=BORDER,
-                    title='Anomaly Score',
-                    titlefont=dict(
-                        size=11, color=TXT2),
-                    range=[0, 1.05]))
-
-            st.plotly_chart(
-                fig,
-                use_container_width=True,
-                config={'displayModeBar': False})
-
-            st.caption(
-                f"Green dots: normal events  "
-                f"Red diamonds: anomalies  "
-                f"Dashed line: detection threshold")
-
-        # Process activity
-        if 'process_name' in df.columns:
-            tools = ['wevtutil', 'whoami',
-                     'net.exe', 'runas',
-                     'cmd.exe', 'powershell',
-                     'psexec']
-            mask = df['process_name'].str.lower(
-                ).str.contains(
-                '|'.join(tools), na=False)
-            sus = df[mask]
-            if len(sus) > 0:
-                st.markdown(
-                    '<div class="sec-label">'
-                    'Process Activity</div>',
-                    unsafe_allow_html=True)
-                pc = (sus['process_name']
-                      .value_counts()
-                      .head(8)
-                      .reset_index())
-                pc.columns = ['Process', 'Count']
-                bar = go.Figure(go.Bar(
-                    x=pc['Count'],
-                    y=pc['Process'],
-                    orientation='h',
-                    marker=dict(
-                        color=ACCENT,
-                        opacity=0.8,
-                        line=dict(width=0))))
-                bar.update_layout(
-                    **make_chart_layout(280))
-                st.plotly_chart(
-                    bar,
-                    use_container_width=True,
-                    config={'displayModeBar': False})
-
-        # World map
-        if 'ip_address' in df.columns:
-            skip = ('192.168', '10.', '172.',
-                    '127.', '-', 'UNKNOWN')
-            pub = [
-                ip for ip in
-                df['ip_address'].dropna().unique()
-                if ip and not any(
-                    ip.startswith(s) for s in skip)]
-            if pub:
-                st.markdown(
-                    '<div class="sec-label">'
-                    'IP Origin Map</div>',
-                    unsafe_allow_html=True)
-                with st.spinner(
-                        "Resolving locations..."):
-                    locs = geolocate_ips(pub[:20])
-                if locs:
-                    sus_ips = (
-                        df[df['if_flag'] == 1][
-                            'ip_address']
-                        .dropna().unique().tolist()
-                        if 'if_flag' in df.columns
-                        else [])
-                    loc_df = pd.DataFrame(locs)
-                    loc_df['type'] = loc_df['ip'].apply(
-                        lambda x: 'Suspicious'
-                        if x in sus_ips else 'Normal')
-                    map_fig = px.scatter_geo(
-                        loc_df,
-                        lat='lat', lon='lon',
-                        color='type',
-                        color_discrete_map={
-                            'Suspicious': ACCENT,
-                            'Normal': SUCCESS},
-                        hover_data={
-                            'ip': True,
-                            'country': True,
-                            'city': True,
-                            'isp': True,
-                            'lat': False,
-                            'lon': False},
-                        projection='natural earth')
-                    map_fig.update_traces(
-                        marker=dict(
-                            size=12, opacity=0.9))
-                    map_fig.update_layout(
-                        geo=dict(
-                            bgcolor='rgba(0,0,0,0)',
-                            landcolor='#1a2035',
-                            oceancolor='#0a0c14',
-                            showocean=True,
-                            showland=True,
-                            showcountries=True,
-                            countrycolor=BORDER,
-                            showframe=False),
-                        **make_chart_layout(350),
-                        showlegend=True)
-                    st.plotly_chart(
-                        map_fig,
-                        use_container_width=True,
-                        config={
-                            'displayModeBar': False})
-
-        # Flagged events table
-        if 'if_flag' in df.columns:
-            flagged = df[df['if_flag'] == 1]
-            if len(flagged) > 0:
-                st.markdown(
-                    f'<div class="sec-label">'
-                    f'Flagged Events '
-                    f'({len(flagged):,})</div>',
-                    unsafe_allow_html=True)
-                show_cols = [
-                    c for c in [
-                        'time_created',
-                        'event_id',
-                        'account_name',
-                        'process_name',
-                        'is_critical_event',
-                        'if_score'
-                    ] if c in flagged.columns]
-                st.dataframe(
-                    flagged[show_cols]
-                    .sort_values(
-                        'if_score',
-                        ascending=False)
-                    .head(100),
-                    use_container_width=True,
-                    hide_index=True)
-
-        st.markdown(
-            '<div style="margin-top:8px">'
-            'Go to the Report page to download '
-            'the full forensic report.'
-            '</div>',
-            unsafe_allow_html=True)
-
-        st.info(
-            "Results are saved. If you switch theme, "
-            "go to Findings page to see results. "
-            "Re-upload file only if you want new analysis.")
+    if st.session_state.analysis_done:
+        render_analysis_results()
 
     st.markdown('</div>', unsafe_allow_html=True)
 
@@ -2089,28 +2117,37 @@ elif page == 'Report':
 </div>""", unsafe_allow_html=True)
 
             try:
-                pdf_bytes = generate_pdf_report(
-                    df=st.session_state.df_result,
-                    verdict=st.session_state.verdict,
-                    deleted_count=(
-                        st.session_state.deleted_count),
-                    injected_count=(
-                        st.session_state.injected_count),
-                    anomaly_count=(
-                        st.session_state.anomaly_count),
-                    critical_count=(
-                        st.session_state.critical_count),
-                    findings=st.session_state.findings,
-                    analysis_timestamp=(
-                        st.session_state.analysis_time
-                        or "N/A")
-                )
-                st.download_button(
-                    label="Download PDF Report",
-                    data=pdf_bytes,
-                    file_name="logshield_report.pdf",
-                    mime="application/pdf",
-                    use_container_width=True)
+                if st.session_state.uploaded_bytes:
+                    pdf_df = run_analysis_pipeline(
+                        st.session_state.uploaded_bytes)['df']
+                else:
+                    pdf_df = None
+                if pdf_df is None:
+                    st.error(
+                        "No analysis data available.")
+                else:
+                    pdf_bytes = generate_pdf_report(
+                        df=pdf_df,
+                        verdict=st.session_state.verdict,
+                        deleted_count=(
+                            st.session_state.deleted_count),
+                        injected_count=(
+                            st.session_state.injected_count),
+                        anomaly_count=(
+                            st.session_state.anomaly_count),
+                        critical_count=(
+                            st.session_state.critical_count),
+                        findings=st.session_state.findings,
+                        analysis_timestamp=(
+                            st.session_state.analysis_time
+                            or "N/A")
+                    )
+                    st.download_button(
+                        label="Download PDF Report",
+                        data=pdf_bytes,
+                        file_name="logshield_report.pdf",
+                        mime="application/pdf",
+                        use_container_width=True)
             except Exception as e:
                 st.error(
                     f"PDF generation failed: {str(e)}")
@@ -2143,23 +2180,21 @@ elif page == 'Report':
     </div>
 </div>""", unsafe_allow_html=True)
 
-            df_r = st.session_state.df_result
-            if (df_r is not None and
-                    'if_flag' in df_r.columns):
-                flagged = df_r[df_r['if_flag'] == 1]
-                show = [c for c in [
-                    'time_created', 'event_id',
-                    'account_name', 'process_name',
-                    'is_critical_event', 'if_score'
-                ] if c in flagged.columns]
+            preview_json = st.session_state.flagged_preview
+            if preview_json:
+                flagged = pd.read_json(
+                    io.StringIO(preview_json),
+                    orient='split')
                 st.download_button(
                     label="Download CSV Report",
-                    data=flagged[show].to_csv(
-                        index=False),
+                    data=flagged.to_csv(index=False),
                     file_name=(
                         "logshield_flagged.csv"),
                     mime="text/csv",
                     use_container_width=True)
+            elif st.session_state.uploaded_bytes:
+                st.caption(
+                    "No flagged events in last analysis.")
 
     st.markdown('</div>', unsafe_allow_html=True)
 

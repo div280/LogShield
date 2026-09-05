@@ -31,65 +31,62 @@ from dashboard.utils.pdf_report import generate_pdf_report
 from dashboard.utils.threat_panels import build_all_threat_panels
 from dashboard.utils.threat_render import render_threat_overview
 
-try:
-    st.set_page_config(
-        page_title="LogShield",
-        page_icon="https://img.icons8.com/fluency/48/shield.png",
-        layout="wide",
-        initial_sidebar_state="expanded"
-    )
-except Exception:
-    pass
+st.set_page_config(
+    page_title="LogShield",
+    page_icon="https://img.icons8.com/fluency/48/shield.png",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
 # -- THEME STATE --
-try:
-    if 'dark_mode' not in st.session_state:
-        st.session_state.dark_mode = True
-    if 'page' not in st.session_state:
-        st.session_state.page = 'Dashboard'
-    if 'analysis_done' not in st.session_state:
-        st.session_state.analysis_done = False
-    if 'uploaded_bytes' not in st.session_state:
-        st.session_state.uploaded_bytes = None
-    if 'upload_fingerprint' not in st.session_state:
-        st.session_state.upload_fingerprint = None
-    if 'verdict' not in st.session_state:
-        st.session_state.verdict = None
-    if 'total_events' not in st.session_state:
-        st.session_state.total_events = 0
-    if 'deleted_count' not in st.session_state:
-        st.session_state.deleted_count = 0
-    if 'injected_count' not in st.session_state:
-        st.session_state.injected_count = 0
-    if 'anomaly_count' not in st.session_state:
-        st.session_state.anomaly_count = 0
-    if 'critical_count' not in st.session_state:
-        st.session_state.critical_count = 0
-    if 'findings' not in st.session_state:
-        st.session_state.findings = []
-    if 'analysis_time' not in st.session_state:
-        st.session_state.analysis_time = None
-    if 'hmac_ok' not in st.session_state:
-        st.session_state.hmac_ok = False
-    if 'if_ok' not in st.session_state:
-        st.session_state.if_ok = False
-    if 'chain_intact' not in st.session_state:
-        st.session_state.chain_intact = True
-    if 'timeline_data' not in st.session_state:
-        st.session_state.timeline_data = None
-    if 'process_chart' not in st.session_state:
-        st.session_state.process_chart = []
-    if 'flagged_preview' not in st.session_state:
-        st.session_state.flagged_preview = None
-    if 'threat_panels' not in st.session_state:
-        st.session_state.threat_panels = None
-    if 'baseline_mismatch' not in st.session_state:
-        st.session_state.baseline_mismatch = False
-    if 'baseline_warning' not in st.session_state:
-        st.session_state.baseline_warning = ''
-    dm = st.session_state.dark_mode
-except Exception:
-    dm = True
+if 'dark_mode' not in st.session_state:
+    st.session_state.dark_mode = True
+if 'page' not in st.session_state:
+    st.session_state.page = 'Dashboard'
+if 'analysis_done' not in st.session_state:
+    st.session_state.analysis_done = False
+if 'uploaded_bytes' not in st.session_state:
+    st.session_state.uploaded_bytes = None
+if 'upload_fingerprint' not in st.session_state:
+    st.session_state.upload_fingerprint = None
+if 'verdict' not in st.session_state:
+    st.session_state.verdict = None
+if 'total_events' not in st.session_state:
+    st.session_state.total_events = 0
+if 'deleted_count' not in st.session_state:
+    st.session_state.deleted_count = 0
+if 'injected_count' not in st.session_state:
+    st.session_state.injected_count = 0
+if 'anomaly_count' not in st.session_state:
+    st.session_state.anomaly_count = 0
+if 'critical_count' not in st.session_state:
+    st.session_state.critical_count = 0
+if 'findings' not in st.session_state:
+    st.session_state.findings = []
+if 'analysis_time' not in st.session_state:
+    st.session_state.analysis_time = None
+if 'hmac_ok' not in st.session_state:
+    st.session_state.hmac_ok = False
+if 'if_ok' not in st.session_state:
+    st.session_state.if_ok = False
+if 'chain_intact' not in st.session_state:
+    st.session_state.chain_intact = True
+if 'timeline_data' not in st.session_state:
+    st.session_state.timeline_data = None
+if 'process_chart' not in st.session_state:
+    st.session_state.process_chart = []
+if 'flagged_preview' not in st.session_state:
+    st.session_state.flagged_preview = None
+if 'threat_panels' not in st.session_state:
+    st.session_state.threat_panels = None
+if 'baseline_mismatch' not in st.session_state:
+    st.session_state.baseline_mismatch = False
+if 'baseline_warning' not in st.session_state:
+    st.session_state.baseline_warning = ''
+
+if "dark_mode" not in st.session_state:
+    st.session_state.dark_mode = True 
+dm = st.session_state.dark_mode
 
 # -- COLOR TOKENS --
 if dm:
@@ -1969,7 +1966,7 @@ if page == 'Dashboard':
             fig.update_layout(
                 **make_chart_layout(320),
                 title=dict(
-                    text='Event Timeline',
+                    text='Event Timeline (Demo)',
                     font=dict(
                         size=13, color=TXT1)))
             st.plotly_chart(

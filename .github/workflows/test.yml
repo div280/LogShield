@@ -8,9 +8,9 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
     - name: Set up Python 3.10
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5
       with:
         python-version: '3.10'
     - name: Install dependencies
@@ -19,4 +19,9 @@ jobs:
         pip install -r requirements.txt
     - name: Run tests
       run: |
-        pytest tests/ -v --tb=short
+        echo "### Pytest Test Execution" >> $GITHUB_STEP_SUMMARY
+        echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+        pytest tests/ -v -ra --tb=short 2>&1 | tee test_output.log || true
+        cat test_output.log >> $GITHUB_STEP_SUMMARY
+        echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+        python -c "import sys; c=open('test_output.log').read(); sys.exit(1 if ('FAILED' in c or 'ERRORS' in c or 'ERROR ' in c) else 0)"

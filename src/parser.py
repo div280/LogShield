@@ -158,53 +158,103 @@ def parse_csv_file(filepath: str) -> pd.DataFrame:
     Time Complexity: O(n)
     Space Complexity: O(n)
     """
-    try:
-        if not filepath.lower().endswith('.csv'):
-            raise ValueError("Only .csv files accepted")
-            
-        safe_path = os.path.normpath(filepath)
-        parts = safe_path.split(os.sep)
-        if '..' in parts or safe_path.startswith('..'):
-            raise ValueError("Path traversal detected")
-            
-        if not os.path.exists(safe_path):
-            raise FileNotFoundError(f"File not found: {safe_path}")
-            
-        if os.path.getsize(safe_path) > 50 * 1024 * 1024:
-            raise ValueError("File exceeds 50MB limit")
-            
-        df = pd.read_csv(safe_path)
-        
-        df['time_created'] = pd.to_datetime(
-            df['time_created'], utc=True, errors='coerce')
-            
-        if 'account_name' in df.columns:
-            df['account_name'] = df['account_name'].fillna('UNKNOWN')
-        else:
-            df['account_name'] = 'UNKNOWN'
-            
-        if 'process_name' in df.columns:
-            df['process_name'] = df['process_name'].fillna('UNKNOWN')
-        else:
-            df['process_name'] = 'UNKNOWN'
-            
-        if 'event_data' in df.columns:
-            df['event_data'] = df['event_data'].fillna('')
-        else:
-            df['event_data'] = ''
-            
-        if 'event_id' in df.columns:
-            df['event_id'] = pd.to_numeric(
-                df['event_id'], errors='coerce').fillna(0).astype(int)
-        else:
-            df['event_id'] = 0
-            
-        validate_dataframe(df)
-        return df
-    except Exception as e:
-        if isinstance(e, (ValueError, FileNotFoundError)):
-            raise e
-        raise ValueError(f"Error parsing CSV file: {e}")
+    # Sanitize path - normalize but keep full path
+    safe_path = os.path.normpath(
+        os.path.abspath(filepath))
+    
+    # Check extension using basename only
+    ext = os.path.splitext(
+        os.path.basename(safe_path))[1].lower()
+    if ext != '.csv':
+        raise ValueError(
+            f"Only .csv files accepted. "
+            f"Got: {ext}")
+    
+    # Check file size
+    if not os.path.exists(safe_path):
+        raise FileNotFoundError(f"File not found: {safe_path}")
+    if os.path.getsize(safe_path) > 50 * 1024 * 1024:
+        raise ValueError(
+            "File exceeds 50MB limit")
+    
+    # Read CSV
+    df = pd.read_csv(safe_path, low_memory=False)
+    
+    # Parse timestamps
+    df['time_created'] = pd.to_datetime(
+        df['time_created'], utc=True, errors='coerce')
+    
+    # Fill nulls
+    if 'account_name' in df.columns:
+        df['account_name'] = (
+            df['account_name'].fillna('UNKNOWN'))
+    else:
+        df['account_name'] = 'UNKNOWN'
+
+    if 'process_name' in df.columns:
+        df['process_name'] = (
+            df['process_name'].fillna('UNKNOWN'))
+    else:
+        df['process_name'] = 'UNKNOWN'
+
+    if 'event_data' in df.columns:
+        df['event_data'] = (
+            df['event_data'].fillna(''))
+    
+    # Ensure event_id is integer
+    if 'event_id' in df.columns:
+        df['event_id'] = pd.to_numeric(
+            df['event_id'],
+            errors='coerce').fillna(0).astype(int)
+    else:
+        df['event_id'] = 0
+    
+    # Validate
+    validate_dataframe(df)
+    
+    return df
+
+def parse_csv_from_bytes(file_bytes: bytes
+                          ) -> pd.DataFrame:
+    """
+    Parse CSV directly from bytes (no temp file).
+    Used by dashboard to avoid Windows file locking.
+    
+    Args:
+        file_bytes: raw bytes from st.file_uploader
+    Returns:
+        pd.DataFrame with standardized columns
+    Time Complexity: O(n)
+    Space Complexity: O(n)
+    """
+    import io
+    
+    # Read directly from bytes buffer
+    buffer = io.BytesIO(file_bytes)
+    df = pd.read_csv(buffer, low_memory=False)
+    
+    # Parse timestamps
+    df['time_created'] = pd.to_datetime(
+        df['time_created'], utc=True, errors='coerce')
+    
+    # Fill nulls
+    df['account_name'] = (
+        df['account_name'].fillna('UNKNOWN'))
+    df['process_name'] = (
+        df['process_name'].fillna('UNKNOWN'))
+    if 'event_data' in df.columns:
+        df['event_data'] = (
+            df['event_data'].fillna(''))
+    
+    # Ensure event_id is integer
+    df['event_id'] = pd.to_numeric(
+        df['event_id'],
+        errors='coerce').fillna(0).astype(int)
+    
+    # Validate
+    validate_dataframe(df)
+    
+    return df
 
 def validate_dataframe(df: pd.DataFrame) -> bool:
     """Validate DataFrame has required columns.

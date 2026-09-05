@@ -4,7 +4,7 @@ import os
 import sys
 sys.path.insert(0, os.path.join(
     os.path.dirname(__file__), '..'))
-from src.parser import parse_csv_file, validate_dataframe
+from src.parser import parse_csv_file, parse_csv_from_bytes, validate_dataframe
 import tempfile
 
 SAMPLE_DATA = pd.DataFrame({
@@ -77,3 +77,14 @@ def test_path_traversal_blocked(tmp_path):
     with pytest.raises((ValueError, FileNotFoundError,
                         OSError)):
         parse_csv_file(malicious_path)
+
+def test_parse_csv_from_bytes():
+    csv_bytes = SAMPLE_DATA.to_csv(index=False).encode('utf-8')
+    result = parse_csv_from_bytes(csv_bytes)
+    assert isinstance(result, pd.DataFrame)
+    assert len(result) == 5
+    for col in ['event_id', 'time_created', 'computer', 'is_tampered']:
+        assert col in result.columns
+    assert result['account_name'].isnull().sum() == 0
+    assert result['process_name'].isnull().sum() == 0
+

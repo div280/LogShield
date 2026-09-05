@@ -2,6 +2,7 @@
 import os
 import sys
 import time
+import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from src.parser import parse_csv_from_bytes, MAX_FILE_SIZE
@@ -12,12 +13,12 @@ from src.models.isolation_forest import predict_anomalies
 CLEAN_CSV = (
     r'C:\Users\shrey\OneDrive\Desktop\fdb_logshied'
     r'\logshield_master_clean.csv')
+SKIP_REASON = (
+    'master dataset not available in CI environment - run locally to verify')
 
 
+@pytest.mark.skipif(not os.path.exists(CLEAN_CSV), reason=SKIP_REASON)
 def test_full_clean_csv_upload_pipeline():
-    if not os.path.exists(CLEAN_CSV):
-        import pytest
-        pytest.skip('Clean CSV not available on this machine')
     size = os.path.getsize(CLEAN_CSV)
     assert size <= MAX_FILE_SIZE
     with open(CLEAN_CSV, 'rb') as handle:
@@ -30,11 +31,9 @@ def test_full_clean_csv_upload_pipeline():
     assert 'if_flag' in df.columns
 
 
+@pytest.mark.skipif(not os.path.exists(CLEAN_CSV), reason=SKIP_REASON)
 def test_master_clean_hmac_baseline_pass():
     """Uploading the master baseline must show intact HMAC chain."""
-    if not os.path.exists(CLEAN_CSV):
-        import pytest
-        pytest.skip('Clean CSV not available on this machine')
     with open(CLEAN_CSV, 'rb') as handle:
         data = handle.read()
     df = parse_csv_from_bytes(data)
@@ -50,11 +49,9 @@ def test_master_clean_hmac_baseline_pass():
     assert continuity['injection_detected'] is False
 
 
+@pytest.mark.skipif(not os.path.exists(CLEAN_CSV), reason=SKIP_REASON)
 def test_master_clean_isolation_forest_count():
     """IF anomaly count must remain stable after chain rebuild."""
-    if not os.path.exists(CLEAN_CSV):
-        import pytest
-        pytest.skip('Clean CSV not available on this machine')
     with open(CLEAN_CSV, 'rb') as handle:
         data = handle.read()
     df = parse_csv_from_bytes(data)

@@ -4,3 +4,6 @@ primaryColor = "#FF4B4B"
 backgroundColor = "#0A0A0F"
 secondaryBackgroundColor = "#0D1117"
 textColor = "#E0E0E0"
+
+[server]
+maxUploadSize = 150

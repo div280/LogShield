@@ -30,6 +30,7 @@ from src.models.isolation_forest import predict_anomalies
 from dashboard.utils.pdf_report import generate_pdf_report
 from dashboard.utils.threat_panels import build_all_threat_panels
 from dashboard.utils.threat_render import render_threat_overview
+from dashboard.attack_map import create_simulated_attack_map
 
 st.set_page_config(
     page_title="LogShield",
@@ -39,57 +40,42 @@ st.set_page_config(
 )
 
 # -- THEME STATE --
-if 'dark_mode' not in st.session_state:
-    st.session_state.dark_mode = True
-if 'page' not in st.session_state:
-    st.session_state.page = 'Dashboard'
-if 'analysis_done' not in st.session_state:
-    st.session_state.analysis_done = False
-if 'df_result' not in st.session_state:
-    st.session_state.df_result = None
-if 'uploaded_bytes' not in st.session_state:
-    st.session_state.uploaded_bytes = None
-if 'upload_fingerprint' not in st.session_state:
-    st.session_state.upload_fingerprint = None
-if 'verdict' not in st.session_state:
-    st.session_state.verdict = None
-if 'total_events' not in st.session_state:
-    st.session_state.total_events = 0
-if 'deleted_count' not in st.session_state:
-    st.session_state.deleted_count = 0
-if 'injected_count' not in st.session_state:
-    st.session_state.injected_count = 0
-if 'anomaly_count' not in st.session_state:
-    st.session_state.anomaly_count = 0
-if 'critical_count' not in st.session_state:
-    st.session_state.critical_count = 0
-if 'findings' not in st.session_state:
-    st.session_state.findings = []
-if 'analysis_time' not in st.session_state:
-    st.session_state.analysis_time = None
-if 'hmac_ok' not in st.session_state:
-    st.session_state.hmac_ok = False
-if 'if_ok' not in st.session_state:
-    st.session_state.if_ok = False
-if 'chain_intact' not in st.session_state:
-    st.session_state.chain_intact = True
-if 'timeline_data' not in st.session_state:
-    st.session_state.timeline_data = None
-if 'process_chart' not in st.session_state:
-    st.session_state.process_chart = []
-if 'flagged_preview' not in st.session_state:
-    st.session_state.flagged_preview = None
-if 'threat_panels' not in st.session_state:
-    st.session_state.threat_panels = None
-if 'baseline_mismatch' not in st.session_state:
-    st.session_state.baseline_mismatch = False
-if 'baseline_warning' not in st.session_state:
-    st.session_state.baseline_warning = ''
+for _k, _v in [
+    ('dark_mode', True),
+    ('page', 'Dashboard'),
+    ('analysis_done', False),
+    ('df_result', None),
+    ('uploaded_bytes', None),
+    ('upload_fingerprint', None),
+    ('verdict', None),
+    ('total_events', 0),
+    ('deleted_count', 0),
+    ('injected_count', 0),
+    ('anomaly_count', 0),
+    ('critical_count', 0),
+    ('findings', []),
+    ('analysis_time', None),
+    ('hmac_ok', False),
+    ('if_ok', False),
+    ('chain_intact', True),
+    ('timeline_data', None),
+    ('process_chart', []),
+    ('flagged_preview', None),
+    ('threat_panels', None),
+    ('baseline_mismatch', False),
+    ('baseline_warning', '')
+]:
+    try:
+        if _k not in st.session_state:
+            st.session_state[_k] = _v
+    except Exception:
+        pass
 
-if "dark_mode" not in st.session_state:
-    st.session_state.dark_mode = True 
-dm = st.session_state.dark_mode
-
+try:
+    dm = st.session_state.get("dark_mode", True)
+    st.session_state["dark_mode"] = dm
+except Exception:
+    dm = True
 # -- COLOR TOKENS --
 if dm:
     BG       = "#0A0C10"
@@ -1817,7 +1803,7 @@ def render_timeline_chart(timeline_data, height=340):
             family='Inter, sans-serif',
             color=TXT2,
             size=11),
-        margin=dict(l=0, r=0, t=12, b=0),
+        margin=dict(l=0, r=0, t=48, b=0),
         height=height,
         hovermode='closest',
         title=dict(
@@ -2377,7 +2363,7 @@ def make_chart_layout(height=320):
             family='Inter, sans-serif',
             color=TXT2,
             size=11),
-        margin=dict(l=0, r=0, t=12, b=0),
+        margin=dict(l=0, r=0, t=48, b=0),
         height=height,
         xaxis=dict(
             gridcolor=BORDER,
@@ -2434,19 +2420,21 @@ with st.sidebar:
         ("Live Monitor", "Real-time mode"),
     ]
 
+    def _set_nav_page(target_page):
+        try:
+            st.session_state["page"] = target_page
+            st.session_state.page = target_page
+        except Exception:
+            pass
+
     for pg, desc in pages:
-        is_active = st.session_state.page == pg
-        active_class = "active" if is_active else ""
-        dot = (
-            '<span class="nav-dot"></span>'
-            if is_active else "")
-        clicked = st.button(
+        is_active = st.session_state.get("page", "Dashboard") == pg
+        st.button(
             pg,
             key=f"nav_{pg}",
+            on_click=_set_nav_page,
+            args=(pg,),
             use_container_width=True)
-        if clicked:
-            st.session_state.page = pg
-            st.rerun()
 
     st.markdown("<br>", unsafe_allow_html=True)
 
@@ -2487,20 +2475,24 @@ with st.sidebar:
     st.markdown('</div>', unsafe_allow_html=True)
 
     st.markdown("<br>", unsafe_allow_html=True)
+    cur_dm = st.session_state.get("dark_mode", True)
     theme_choice = st.radio(
         "Theme",
         options=["Dark", "Light"],
-        index=0 if st.session_state.dark_mode else 1,
+        index=0 if cur_dm else 1,
         horizontal=True,
         key="theme_radio"
     )
     new_dark = (theme_choice == "Dark")
-    if new_dark != st.session_state.dark_mode:
-        st.session_state.dark_mode = new_dark
+    if new_dark != cur_dm:
+        try:
+            st.session_state.dark_mode = new_dark
+        except Exception:
+            pass
         st.rerun()
 
-page = st.session_state.page
-done = st.session_state.analysis_done
+page = st.session_state.get("page", "Dashboard")
+done = st.session_state.get("analysis_done", False)
 
 # -- PAGE: DASHBOARD --
 if page == 'Dashboard':
@@ -3024,6 +3016,30 @@ if page == 'Dashboard':
             config={'displayModeBar': False})
 
     st.markdown('</div>', unsafe_allow_html=True)
+
+    # -- SIMULATED GLOBAL ATTACK MAP (Dashboard page only) --
+    st.markdown(
+        '<div class="sec-label">'
+        'Simulated Global Attack Map</div>',
+        unsafe_allow_html=True)
+    st.caption(
+        "Simulated attacker locations, shown for demonstration "
+        "purposes. Not derived from real geolocation data.")
+    with st.spinner("Rendering attack map..."):
+        _atk_fig = create_simulated_attack_map(
+            victim_lat=20.5937,
+            victim_lon=78.9629,
+            computer_name="FORENSIC-HOST",
+            city="India",
+            country="India",
+            BG=BG, SURFACE=SURFACE,
+            BORDER=BORDER, ACCENT=ACCENT,
+            SUCCESS=SUCCESS, WARN=WARN,
+            CYAN=CYAN, TXT1=TXT1, TXT2=TXT2)
+    st.plotly_chart(
+        _atk_fig,
+        use_container_width=True,
+        config={'displayModeBar': False})
 
 # -- PAGE: ANALYSIS --
 elif page == 'Analysis':

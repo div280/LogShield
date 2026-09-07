@@ -40,6 +40,12 @@ st.set_page_config(
 )
 
 # -- THEME STATE --
+if "dark_mode" not in st.session_state:
+    try:
+        st.session_state.dark_mode = True
+    except Exception:
+        pass
+
 for _k, _v in [
     ('dark_mode', True),
     ('page', 'Dashboard'),
@@ -71,11 +77,19 @@ for _k, _v in [
     except Exception:
         pass
 
+if "dark_mode" not in st.session_state:
+    try:
+        st.session_state.dark_mode = True
+    except Exception:
+        pass
+
 try:
-    dm = st.session_state.get("dark_mode", True)
-    st.session_state["dark_mode"] = dm
+    dm = st.session_state.dark_mode
 except Exception:
-    dm = True
+    try:
+        dm = st.session_state.get("dark_mode", True)
+    except Exception:
+        dm = True
 # -- COLOR TOKENS --
 if dm:
     BG       = "#0A0C10"
@@ -783,6 +797,17 @@ header[data-testid="stHeader"] [data-testid="stExpandSidebarButton"],
 [data-testid="stAlert"] {{
     border-radius: 6px !important;
     font-size: 13px !important;
+    color: {TXT1} !important;
+}}
+
+[data-testid="stAlert"] p,
+[data-testid="stAlert"] div,
+[data-testid="stAlert"] span,
+[data-testid="stAlert"] [data-testid="stMarkdownContainer"],
+[data-testid="stAlert"] [data-testid="stMarkdownContainer"] p,
+[data-testid="stAlert"] [data-testid="stAlertContent"],
+[data-testid="stAlert"] [data-testid="stNotificationContent"] {{
+    color: {TXT1} !important;
 }}
 
 /* PLOTLY CHARTS BG */
@@ -791,9 +816,35 @@ header[data-testid="stHeader"] [data-testid="stExpandSidebarButton"],
 }}
 
 /* CAPTION */
-.stCaption {{
-    color: {TXT3} !important;
+.stCaption,
+[data-testid="stCaptionContainer"],
+.stCaption p {{
+    color: {TXT3 if dm else TXT1} !important;
     font-size: 12px !important;
+}}
+
+/* WIDGET LABELS & RADIO OPTIONS */
+label,
+[data-testid="stWidgetLabel"],
+[data-testid="stWidgetLabel"] p,
+[data-testid="stWidgetLabel"] span,
+.stTextInput label,
+.stRadio label,
+[data-testid="stRadio"] label,
+[data-testid="stRadio"] [data-testid="stWidgetLabel"] p,
+[data-testid="stRadio"] [role="radiogroup"] label,
+[data-testid="stRadio"] [role="radiogroup"] label p,
+[data-testid="stRadio"] [role="radiogroup"] label span,
+[data-testid="stRadio"] [role="radiogroup"] div[data-testid="stMarkdownContainer"] p,
+[data-testid="stRadio"] [role="radiogroup"] div[data-testid="stMarkdownContainer"] span,
+[data-testid="stRadio"] [data-testid="stMarkdownContainer"] p {{
+    color: {TXT1} !important;
+    font-size: 13px !important;
+}}
+
+[data-testid="stWidgetLabel"],
+[data-testid="stWidgetLabel"] p {{
+    font-weight: 600 !important;
 }}
 
 /* METRIC */
@@ -893,7 +944,7 @@ th {{
 
 .status-sub {{
     font-size: 11px;
-    color: {TXT3};
+    color: {TXT3 if dm else TXT2};
     margin-left: auto;
 }}
 </style>
@@ -1801,7 +1852,7 @@ def render_timeline_chart(timeline_data, height=340):
         paper_bgcolor='rgba(0,0,0,0)',
         font=dict(
             family='Inter, sans-serif',
-            color=TXT2,
+            color=TXT1 if not dm else TXT2,
             size=11),
         margin=dict(l=0, r=0, t=48, b=0),
         height=height,
@@ -1818,20 +1869,22 @@ def render_timeline_chart(timeline_data, height=340):
         xaxis=dict(
             gridcolor=BORDER,
             linecolor=BORDER,
+            tickfont=dict(color=TXT1 if not dm else TXT2),
             title=dict(
                 text='Time',
-                font=dict(size=11, color=TXT2))),
+                font=dict(size=11, color=TXT1 if not dm else TXT2))),
         yaxis=dict(
             gridcolor=BORDER,
             linecolor=BORDER,
+            tickfont=dict(color=TXT1 if not dm else TXT2),
             title=dict(
                 text='Anomaly Score',
-                font=dict(size=11, color=TXT2)),
+                font=dict(size=11, color=TXT1 if not dm else TXT2)),
             range=[0, 1.05]),
         legend=dict(
             bgcolor='rgba(0,0,0,0)',
             bordercolor=BORDER,
-            font=dict(size=11)))
+            font=dict(size=11, color=TXT1 if not dm else TXT2)))
     st.plotly_chart(
         fig,
         use_container_width=True,
@@ -2361,24 +2414,26 @@ def make_chart_layout(height=320):
         paper_bgcolor='rgba(0,0,0,0)',
         font=dict(
             family='Inter, sans-serif',
-            color=TXT2,
+            color=TXT1 if not dm else TXT2,
             size=11),
         margin=dict(l=0, r=0, t=48, b=0),
         height=height,
         xaxis=dict(
             gridcolor=BORDER,
             linecolor=BORDER,
+            tickfont=dict(color=TXT1 if not dm else TXT2),
             showgrid=True,
             zeroline=False),
         yaxis=dict(
             gridcolor=BORDER,
             linecolor=BORDER,
+            tickfont=dict(color=TXT1 if not dm else TXT2),
             showgrid=True,
             zeroline=False),
         legend=dict(
             bgcolor='rgba(0,0,0,0)',
             bordercolor=BORDER,
-            font=dict(size=11)),
+            font=dict(size=11, color=TXT1 if not dm else TXT2)),
         hovermode='closest'
     )
 
@@ -2448,7 +2503,7 @@ with st.sidebar:
         f'<div style="padding:0 12px;'
         f'margin-top:8px">'
         f'<div style="font-size:11px;'
-        f'font-weight:700;color:{TXT3};'
+        f'font-weight:700;color:{TXT3 if dm else TXT1};'
         f'letter-spacing:2px;'
         f'text-transform:uppercase;'
         f'padding-bottom:10px;'

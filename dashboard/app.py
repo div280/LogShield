@@ -45,6 +45,8 @@ if 'page' not in st.session_state:
     st.session_state.page = 'Dashboard'
 if 'analysis_done' not in st.session_state:
     st.session_state.analysis_done = False
+if 'df_result' not in st.session_state:
+    st.session_state.df_result = None
 if 'uploaded_bytes' not in st.session_state:
     st.session_state.uploaded_bytes = None
 if 'upload_fingerprint' not in st.session_state:
@@ -324,7 +326,7 @@ header[data-testid="stHeader"] [data-testid="stExpandSidebarButton"],
 }}
 
 .sidebar-tag {{
-    font-size: 9px;
+    font-size: 11px;
     font-weight: 500;
     color: {TXT3};
     letter-spacing: 1.5px;
@@ -354,7 +356,7 @@ header[data-testid="stHeader"] [data-testid="stExpandSidebarButton"],
 }}
 
 .top-bar-meta {{
-    font-size: 11px;
+    font-size: 13px;
     color: {TXT2};
     display: flex;
     align-items: center;
@@ -365,14 +367,14 @@ header[data-testid="stHeader"] [data-testid="stExpandSidebarButton"],
     background: rgba(0,200,83,0.12);
     border: 1px solid rgba(0,200,83,0.25);
     border-radius: 20px;
-    padding: 3px 10px;
-    font-size: 10px;
+    padding: 4px 12px;
+    font-size: 12px;
     font-weight: 700;
     color: {SUCCESS};
     letter-spacing: 1px;
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 6px;
 }}
 
 .live-dot {{
@@ -395,10 +397,10 @@ header[data-testid="stHeader"] [data-testid="stExpandSidebarButton"],
 
 /* SECTION LABELS */
 .sec-label {{
-    font-size: 10px;
+    font-size: 12px;
     font-weight: 700;
     color: {TXT3};
-    letter-spacing: 3px;
+    letter-spacing: 2px;
     text-transform: uppercase;
     padding-bottom: 12px;
     border-bottom: 1px solid {BORDER};
@@ -520,7 +522,7 @@ header[data-testid="stHeader"] [data-testid="stExpandSidebarButton"],
 }}
 
 .confidence-badge {{
-    font-size: 10px;
+    font-size: 11px;
     font-weight: 800;
     letter-spacing: 2px;
     text-transform: uppercase;
@@ -581,7 +583,7 @@ header[data-testid="stHeader"] [data-testid="stExpandSidebarButton"],
 .layer-bar.grey {{ background: {BORDER}; }}
 
 .layer-name {{
-    font-size: 10px;
+    font-size: 11px;
     font-weight: 700;
     color: {TXT3};
     letter-spacing: 2px;
@@ -630,7 +632,7 @@ header[data-testid="stHeader"] [data-testid="stExpandSidebarButton"],
 
 .sev-badge {{
     flex-shrink: 0;
-    font-size: 9px;
+    font-size: 11px;
     font-weight: 800;
     letter-spacing: 1.5px;
     text-transform: uppercase;
@@ -805,7 +807,7 @@ header[data-testid="stHeader"] [data-testid="stExpandSidebarButton"],
 /* CAPTION */
 .stCaption {{
     color: {TXT3} !important;
-    font-size: 11px !important;
+    font-size: 12px !important;
 }}
 
 /* METRIC */
@@ -820,7 +822,7 @@ header[data-testid="stHeader"] [data-testid="stExpandSidebarButton"],
 th {{
     background: {SURFACE} !important;
     color: {TXT2} !important;
-    font-size: 11px !important;
+    font-size: 12px !important;
     letter-spacing: 1px !important;
     text-transform: uppercase !important;
 }}
@@ -858,8 +860,8 @@ th {{
     background: rgba(255,179,0,0.12);
     border: 1px solid rgba(255,179,0,0.25);
     border-radius: 4px;
-    padding: 3px 10px;
-    font-size: 10px;
+    padding: 4px 10px;
+    font-size: 11px;
     font-weight: 700;
     color: {WARN};
     letter-spacing: 1.5px;
@@ -914,6 +916,18 @@ th {{
 # -- HELPER FUNCTIONS --
 
 def geolocate_ips(ip_list):
+    """
+    Resolves geographic location coordinates for public IP addresses.
+
+    Parameters:
+    ip_list (list[str]): List of IP address strings to geolocate.
+
+    Returns:
+    list[dict]: List of dictionaries containing ip, lat, lon, country, city, isp.
+
+    Time complexity: O(n) where n is len(ip_list) up to query limit.
+    Space complexity: O(n) where n is number of resolved locations.
+    """
     locations = []
     seen = set()
     skip = ('192.168', '10.', '172.',
@@ -943,6 +957,631 @@ def geolocate_ips(ip_list):
         except Exception:
             continue
     return locations
+
+
+def make_processing_gauge(total_events, anomalies):
+    """
+    Creates a gauge chart showing log processing rate.
+    Shows total events, anomaly percentage, threat level.
+
+    Parameters:
+    total_events (int): Total number of log events processed.
+    anomalies (int): Number of detected anomalies.
+
+    Returns:
+    go.Figure: Plotly indicator gauge figure.
+
+    Time complexity: O(1)
+    Space complexity: O(1)
+    """
+    threat_pct = (anomalies / max(total_events, 1)) * 100
+
+    fig = go.Figure(go.Indicator(
+        mode="gauge+number+delta",
+        value=threat_pct,
+        number=dict(
+            suffix="%",
+            font=dict(
+                size=36,
+                color=TXT1,
+                family='JetBrains Mono')),
+        delta=dict(
+            reference=5,
+            decreasing=dict(color=SUCCESS),
+            increasing=dict(color=ACCENT)),
+        title=dict(
+            text=(
+                "Threat Level<br>"
+                f"<span style='font-size:13px;"
+                f"color:{TXT2}'>"
+                f"{total_events:,} events analyzed"
+                f"</span>"),
+            font=dict(
+                size=16,
+                color=TXT1,
+                family='Inter')),
+        gauge=dict(
+            axis=dict(
+                range=[0, 100],
+                tickwidth=1,
+                tickcolor=BORDER,
+                tickfont=dict(
+                    size=11,
+                    color=TXT2)),
+            bar=dict(
+                color=ACCENT if threat_pct > 5
+                else WARN if threat_pct > 1
+                else SUCCESS,
+                thickness=0.7),
+            bgcolor=SURFACE,
+            borderwidth=1,
+            bordercolor=BORDER,
+            steps=[
+                dict(
+                    range=[0, 1],
+                    color='rgba(0,200,83,0.08)'),
+                dict(
+                    range=[1, 5],
+                    color='rgba(255,179,0,0.08)'),
+                dict(
+                    range=[5, 100],
+                    color='rgba(232,52,58,0.08)')],
+            threshold=dict(
+                line=dict(
+                    color=WARN,
+                    width=2),
+                thickness=0.75,
+                value=5))))
+
+    fig.update_layout(
+        plot_bgcolor='rgba(0,0,0,0)',
+        paper_bgcolor='rgba(0,0,0,0)',
+        font=dict(
+            family='Inter',
+            color=TXT2),
+        margin=dict(l=20, r=20, t=60, b=20),
+        height=280)
+
+    return fig
+
+
+def make_threat_map(df, sus_ips, normal_ips,
+                    BG, SURFACE, BORDER,
+                    ACCENT, SUCCESS, TXT1, TXT2):
+    """
+    Creates world map showing IP origin locations.
+    Red markers: IPs associated with suspicious events.
+    Green markers: IPs from normal clean events.
+
+    Parameters:
+    df (pd.DataFrame): Analysis results dataframe.
+    sus_ips (list[str]): Suspicious or anomalous IP addresses.
+    normal_ips (list[str]): Normal activity IP addresses.
+    BG (str): Background color hex.
+    SURFACE (str): Card surface color hex.
+    BORDER (str): Border color hex.
+    ACCENT (str): Threat/alarm accent color hex.
+    SUCCESS (str): Normal/success color hex.
+    TXT1 (str): Primary text color hex.
+    TXT2 (str): Secondary text color hex.
+
+    Returns:
+    go.Figure | None: Plotly scattergeo map figure, or None if no public IPs resolve.
+
+    Time complexity: O(n) where n is number of resolved public IPs.
+    Space complexity: O(n) for DataFrame and map traces.
+    """
+    all_ips = list(set(sus_ips + normal_ips))
+    skip = ('192.168', '10.', '172.',
+            '127.', '0.', '-', 'UNKNOWN')
+    public = [
+        ip for ip in all_ips
+        if ip and not any(
+            ip.startswith(s) for s in skip)]
+
+    if not public:
+        return None
+
+    with st.spinner("Resolving IP locations..."):
+        locs = geolocate_ips(public[:30])
+
+    if not locs:
+        return None
+
+    loc_df = pd.DataFrame(locs)
+    loc_df['is_suspicious'] = loc_df['ip'].isin(
+        sus_ips)
+    loc_df['type'] = loc_df['is_suspicious'].map(
+        {True: 'Suspicious Origin',
+         False: 'Normal Activity'})
+    loc_df['size'] = loc_df['is_suspicious'].map(
+        {True: 14, False: 8})
+    loc_df['hover'] = loc_df.apply(
+        lambda r: (
+            f"IP: {r['ip']}<br>"
+            f"Type: {r['type']}<br>"
+            f"Location: {r['city']}, {r['country']}<br>"
+            f"ISP: {r['isp']}"),
+        axis=1)
+
+    fig = go.Figure()
+
+    # Normal IPs
+    norm_locs = loc_df[~loc_df['is_suspicious']]
+    if len(norm_locs) > 0:
+        fig.add_trace(go.Scattergeo(
+            lon=norm_locs['lon'],
+            lat=norm_locs['lat'],
+            text=norm_locs['hover'],
+            hoverinfo='text',
+            name='Normal Activity',
+            marker=dict(
+                size=8,
+                color=SUCCESS,
+                opacity=0.7,
+                line=dict(width=0))))
+
+    # Suspicious IPs
+    sus_locs = loc_df[loc_df['is_suspicious']]
+    if len(sus_locs) > 0:
+        fig.add_trace(go.Scattergeo(
+            lon=sus_locs['lon'],
+            lat=sus_locs['lat'],
+            text=sus_locs['hover'],
+            hoverinfo='text',
+            name='Suspicious Origin',
+            marker=dict(
+                size=14,
+                color=ACCENT,
+                opacity=0.85,
+                line=dict(
+                    width=1,
+                    color='rgba(255,255,255,0.3)'))))
+
+    fig.update_layout(
+        geo=dict(
+            bgcolor='rgba(0,0,0,0)',
+            landcolor='#1a2035',
+            oceancolor='#0a0c14',
+            showocean=True,
+            showland=True,
+            showcountries=True,
+            countrycolor=BORDER,
+            showframe=False,
+            showcoastlines=True,
+            coastlinecolor=BORDER,
+            projection_type='natural earth'),
+        paper_bgcolor='rgba(0,0,0,0)',
+        font=dict(
+            family='Inter',
+            color=TXT2,
+            size=11),
+        title=dict(
+            text='Threat Activity Map',
+            font=dict(
+                size=13,
+                color=TXT1)),
+        legend=dict(
+            bgcolor='rgba(0,0,0,0)',
+            bordercolor=BORDER,
+            borderwidth=1,
+            font=dict(size=11)),
+        margin=dict(l=0, r=0, t=40, b=0),
+        height=380)
+
+    return fig
+
+
+def make_victim_map(
+        computer_name, city, country,
+        findings, BG, SURFACE, BORDER,
+        ACCENT, SUCCESS, WARN, TXT1, TXT2):
+    """
+    Shows the forensic subject machine on world map.
+    Always displays even with no external IPs.
+    Uses geocoding to find lat/lon from city name.
+
+    Parameters:
+    computer_name (str): Hostname of the analyzed machine.
+    city (str): Subject machine city name.
+    country (str): Subject machine country name.
+    findings (list[dict]): Forensic findings list.
+    BG (str): Background color hex.
+    SURFACE (str): Card surface color hex.
+    BORDER (str): Border color hex.
+    ACCENT (str): Critical accent color hex.
+    SUCCESS (str): Normal/success color hex.
+    WARN (str): Warning/amber color hex.
+    TXT1 (str): Primary text color hex.
+    TXT2 (str): Secondary text color hex.
+
+    Returns:
+    go.Figure: Plotly scattergeo map figure.
+
+    Time complexity: O(1)
+    Space complexity: O(1)
+    """
+    # Geocode the city using nominatim free API
+    lat, lon = None, None
+    try:
+        resp = requests.get(
+            'https://nominatim.openstreetmap.org/search',
+            params={
+                'q': f'{city}, {country}',
+                'format': 'json',
+                'limit': 1
+            },
+            headers={
+                'User-Agent': 'LogShield/1.0'
+            },
+            timeout=5)
+        data = resp.json()
+        if data:
+            lat = float(data[0]['lat'])
+            lon = float(data[0]['lon'])
+    except Exception:
+        pass
+
+    # Default to center of India if geocode fails
+    if lat is None:
+        lat = 20.5937
+        lon = 78.9629
+
+    # Determine marker color from findings
+    has_critical = any(
+        isinstance(f, dict) and f.get('sev') == 'critical'
+        for f in (findings or []))
+    marker_color = (
+        ACCENT if has_critical else WARN)
+
+    # Build hover text
+    n_critical = sum(
+        1 for f in (findings or [])
+        if isinstance(f, dict) and f.get('sev') == 'critical')
+    n_high = sum(
+        1 for f in (findings or [])
+        if isinstance(f, dict) and f.get('sev') == 'high')
+
+    hover_text = (
+        f"Machine: {computer_name}<br>"
+        f"Location: {city}, {country}<br>"
+        f"Status: FORENSIC SUBJECT<br>"
+        f"Critical Findings: {n_critical}<br>"
+        f"High Findings: {n_high}<br>"
+        f"Role: Log source under investigation")
+
+    fig = go.Figure()
+
+    # Pulsing effect using multiple circles
+    for size, opacity in [
+            (40, 0.08), (28, 0.15), (18, 0.4)]:
+        fig.add_trace(go.Scattergeo(
+            lon=[lon],
+            lat=[lat],
+            mode='markers',
+            marker=dict(
+                size=size,
+                color=marker_color,
+                opacity=opacity,
+                line=dict(width=0)),
+            hoverinfo='none',
+            showlegend=False))
+
+    # Main marker with label
+    fig.add_trace(go.Scattergeo(
+        lon=[lon],
+        lat=[lat],
+        mode='markers+text',
+        text=[computer_name],
+        textposition='top center',
+        textfont=dict(
+            size=12,
+            color=TXT1,
+            family='Inter'),
+        marker=dict(
+            size=16,
+            color=marker_color,
+            symbol='circle',
+            line=dict(
+                width=2,
+                color='white')),
+        hovertext=hover_text,
+        hoverinfo='text',
+        name='Forensic Subject',
+        showlegend=True))
+
+    # Add annotation box
+    fig.add_trace(go.Scattergeo(
+        lon=[lon + 8],
+        lat=[lat + 6],
+        mode='text',
+        text=[
+            f"FORENSIC SUBJECT<br>"
+            f"{n_critical} CRITICAL | "
+            f"{n_high} HIGH"],
+        textfont=dict(
+            size=11,
+            color=marker_color,
+            family='Inter'),
+        hoverinfo='none',
+        showlegend=False))
+
+    fig.update_layout(
+        geo=dict(
+            bgcolor='rgba(0,0,0,0)',
+            landcolor='#1a2035',
+            oceancolor='#0a0c14',
+            showocean=True,
+            showland=True,
+            showcountries=True,
+            countrycolor=BORDER,
+            showframe=False,
+            showcoastlines=True,
+            coastlinecolor=BORDER,
+            showrivers=False,
+            projection_type='natural earth',
+            center=dict(lat=lat, lon=lon),
+            projection_scale=3),
+        paper_bgcolor='rgba(0,0,0,0)',
+        font=dict(
+            family='Inter',
+            color=TXT2,
+            size=12),
+        title=dict(
+            text='Forensic Subject Location',
+            font=dict(
+                size=14,
+                color=TXT1)),
+        legend=dict(
+            bgcolor='rgba(0,0,0,0)',
+            bordercolor=BORDER,
+            borderwidth=1,
+            font=dict(size=11)),
+        margin=dict(l=0, r=0, t=40, b=0),
+        height=380)
+
+    return fig
+
+
+def make_network_diagram(
+        df, BG, SURFACE, BORDER,
+        ACCENT, SUCCESS, WARN, CYAN,
+        TXT1, TXT2):
+    """
+    Network topology showing internal machine, account, and process activity.
+    Shows which machines communicated during the investigation period.
+    Red nodes: involved in suspicious events.
+    Green nodes: normal activity only.
+    Center node: forensic subject machine.
+
+    Parameters:
+    df (pd.DataFrame): Analysis results dataframe.
+    BG (str): Background color hex.
+    SURFACE (str): Card surface color hex.
+    BORDER (str): Border color hex.
+    ACCENT (str): Suspicious/critical color hex.
+    SUCCESS (str): Normal activity color hex.
+    WARN (str): Center machine/subject color hex.
+    CYAN (str): Info accent color hex.
+    TXT1 (str): Primary text color hex.
+    TXT2 (str): Secondary text color hex.
+
+    Returns:
+    go.Figure: Plotly network topology figure.
+
+    Time complexity: O(n) where n is rows in DataFrame.
+    Space complexity: O(k) where k is number of nodes and edges.
+    """
+    import math
+
+    nodes = []
+    edges = []
+    node_colors = []
+    node_sizes = []
+    node_labels = []
+    node_hover = []
+
+    # Get computer name (center node)
+    center = 'UNKNOWN'
+    if 'computer' in df.columns:
+        center = df['computer'].mode().iloc[0] if len(df) > 0 else 'UNKNOWN'
+
+    nodes.append(center)
+    node_colors.append(WARN)
+    node_sizes.append(30)
+    node_labels.append(center)
+    node_hover.append(
+        f"Machine: {center}<br>"
+        f"Role: Forensic Subject<br>"
+        f"Status: Under Investigation<br>"
+        f"Total Events: {len(df):,}")
+
+    # Get account names (user nodes)
+    if 'account_name' in df.columns:
+        accounts = (df['account_name']
+                    .dropna()
+                    .replace('UNKNOWN', pd.NA)
+                    .dropna()
+                    .value_counts()
+                    .head(6))
+
+        for account, count in accounts.items():
+            # Check if this account was in anomalous events
+            if 'if_flag' in df.columns:
+                anom_count = len(df[
+                    (df['account_name'] == account) &
+                    (df['if_flag'] == 1)])
+                is_suspicious = anom_count > 0
+            else:
+                is_suspicious = False
+
+            nodes.append(account)
+            node_colors.append(
+                ACCENT if is_suspicious else SUCCESS)
+            node_sizes.append(20)
+            node_labels.append(account)
+            node_hover.append(
+                f"Account: {account}<br>"
+                f"Total Events: {count:,}<br>"
+                f"Status: "
+                f"{'SUSPICIOUS' if is_suspicious else 'Normal'}")
+            edges.append((0, len(nodes)-1))
+
+    # Get process names (process nodes)
+    if 'process_name' in df.columns:
+        attack_tools = [
+            'wevtutil', 'whoami', 'net.exe',
+            'runas', 'cmd.exe', 'powershell',
+            'psexec']
+        for tool in attack_tools:
+            mask = (df['process_name']
+                    .str.lower()
+                    .str.contains(tool, na=False))
+            count = mask.sum()
+            if count > 0:
+                nodes.append(tool)
+                node_colors.append(ACCENT)
+                node_sizes.append(18)
+                node_labels.append(tool)
+                node_hover.append(
+                    f"Process: {tool}<br>"
+                    f"Executions: {count:,}<br>"
+                    f"Status: SUSPICIOUS TOOL<br>"
+                    f"Risk: Attack-associated process")
+                edges.append((0, len(nodes)-1))
+
+    # Critical event nodes
+    if 'event_id' in df.columns:
+        n1102 = (df['event_id'] == 1102).sum()
+        n4719 = (df['event_id'] == 4719).sum()
+
+        if n1102 > 0:
+            nodes.append('LOG\nCLEARED')
+            node_colors.append(ACCENT)
+            node_sizes.append(25)
+            node_labels.append('LOG CLEARED')
+            node_hover.append(
+                f"Event: Log Cleared (1102)<br>"
+                f"Count: {n1102}x<br>"
+                f"Severity: CRITICAL<br>"
+                f"Meaning: Evidence destroyed")
+            edges.append((0, len(nodes)-1))
+
+        if n4719 > 0:
+            nodes.append('AUDIT\nDISABLED')
+            node_colors.append(ACCENT)
+            node_sizes.append(22)
+            node_labels.append('AUDIT DISABLED')
+            node_hover.append(
+                f"Event: Audit Policy Changed (4719)<br>"
+                f"Count: {n4719}x<br>"
+                f"Severity: HIGH<br>"
+                f"Meaning: Logging suppressed")
+            edges.append((0, len(nodes)-1))
+
+    # Create circular layout
+    n = len(nodes)
+    pos_x = [0.0]
+    pos_y = [0.0]
+
+    for i in range(1, n):
+        angle = 2 * math.pi * (i-1) / max(n-1, 1)
+        radius = 1.8
+        pos_x.append(radius * math.cos(angle))
+        pos_y.append(radius * math.sin(angle))
+
+    # Edge traces
+    edge_traces = []
+    for src, tgt in edges:
+        if src < len(pos_x) and tgt < len(pos_x):
+            is_red_edge = (
+                node_colors[tgt] == ACCENT)
+            edge_traces.append(go.Scatter(
+                x=[pos_x[src], pos_x[tgt], None],
+                y=[pos_y[src], pos_y[tgt], None],
+                mode='lines',
+                line=dict(
+                    width=1.5 if is_red_edge else 1,
+                    color=(
+                        'rgba(232,52,58,0.4)'
+                        if is_red_edge
+                        else 'rgba(30,37,48,0.8)')),
+                hoverinfo='none',
+                showlegend=False))
+
+    # Node trace
+    node_trace = go.Scatter(
+        x=pos_x,
+        y=pos_y,
+        mode='markers+text',
+        hoverinfo='text',
+        hovertext=node_hover,
+        text=node_labels,
+        textposition=[
+            'middle center' if i == 0
+            else 'top center'
+            for i in range(len(nodes))],
+        textfont=dict(
+            size=[12 if i == 0 else 11
+                  for i in range(len(nodes))],
+            color=[TXT1] * len(nodes),
+            family='Inter'),
+        marker=dict(
+            size=[s * 3 for s in node_sizes],
+            color=node_colors,
+            line=dict(
+                width=2,
+                color=SURFACE)),
+        showlegend=False)
+
+    fig = go.Figure(
+        data=edge_traces + [node_trace])
+
+    # Legend
+    for label, color in [
+            ('Suspicious', ACCENT),
+            ('Normal', SUCCESS),
+            ('Subject', WARN)]:
+        fig.add_trace(go.Scatter(
+            x=[None], y=[None],
+            mode='markers',
+            name=label,
+            marker=dict(
+                size=10,
+                color=color)))
+
+    fig.update_layout(
+        plot_bgcolor='rgba(0,0,0,0)',
+        paper_bgcolor='rgba(0,0,0,0)',
+        font=dict(
+            family='Inter',
+            color=TXT2),
+        title=dict(
+            text='Internal Network Activity',
+            font=dict(
+                size=14,
+                color=TXT1)),
+        showlegend=True,
+        legend=dict(
+            bgcolor='rgba(0,0,0,0)',
+            bordercolor=BORDER,
+            borderwidth=1,
+            font=dict(size=11)),
+        hovermode='closest',
+        margin=dict(l=0, r=0, t=40, b=0),
+        height=400,
+        xaxis=dict(
+            showgrid=False,
+            zeroline=False,
+            showticklabels=False,
+            showline=False),
+        yaxis=dict(
+            showgrid=False,
+            zeroline=False,
+            showticklabels=False,
+            showline=False))
+
+    return fig
 
 
 def get_verdict(deleted, injected, anomalies,
@@ -1081,6 +1720,7 @@ def run_analysis_pipeline(file_bytes):
 def save_analysis_to_session(result, file_bytes):
     """Persist primitive analysis results in session."""
     st.session_state.analysis_done = True
+    st.session_state.df_result = result['df']
     st.session_state.uploaded_bytes = file_bytes
     st.session_state.upload_fingerprint = (
         _file_fingerprint(file_bytes))
@@ -1469,6 +2109,138 @@ def render_analysis_results():
             use_container_width=True,
             config={'displayModeBar': False})
 
+    df = st.session_state.df_result
+    findings = st.session_state.findings or []
+
+    if df is not None:
+        st.markdown(
+            '<div class="sec-label">'
+            'Threat Activity Map</div>',
+            unsafe_allow_html=True)
+
+        # Location input
+        map_col1, map_col2 = st.columns([3, 1])
+        with map_col2:
+            city_input = st.text_input(
+                "Subject machine city",
+                value="Bangalore",
+                help=(
+                    "Enter the city where the machine "
+                    "being investigated is located. "
+                    "Used for geographic visualization."))
+            country_input = st.text_input(
+                "Country",
+                value="India")
+
+        with map_col1:
+            # Get computer name from data
+            comp_name = 'UNKNOWN'
+            if 'computer' in df.columns:
+                comp_name = (
+                    df['computer'].mode().iloc[0]
+                    if len(df) > 0 else 'UNKNOWN')
+
+            # Always show victim machine map
+            with st.spinner(
+                    "Rendering geographic map..."):
+                victim_map = make_victim_map(
+                    computer_name=comp_name,
+                    city=city_input,
+                    country=country_input,
+                    findings=findings,
+                    BG=BG, SURFACE=SURFACE,
+                    BORDER=BORDER, ACCENT=ACCENT,
+                    SUCCESS=SUCCESS, WARN=WARN,
+                    TXT1=TXT1, TXT2=TXT2)
+                st.plotly_chart(
+                    victim_map,
+                    use_container_width=True,
+                    config={'displayModeBar': False})
+
+            st.caption(
+                f"Showing forensic subject: {comp_name}  "
+                f"Location: {city_input}, {country_input}  "
+                f"Enter the actual location of the "
+                f"investigated machine in the fields above.")
+
+        # Network topology
+        st.markdown(
+            '<div class="sec-label">'
+            'Network Activity Topology</div>',
+            unsafe_allow_html=True)
+        st.caption(
+            "Visual map of machines, accounts, and "
+            "processes involved in this log session. "
+            "Red nodes indicate suspicious activity.")
+
+        net_fig = make_network_diagram(
+            df=df,
+            BG=BG, SURFACE=SURFACE,
+            BORDER=BORDER, ACCENT=ACCENT,
+            SUCCESS=SUCCESS, WARN=WARN,
+            CYAN=CYAN, TXT1=TXT1, TXT2=TXT2)
+
+        st.plotly_chart(
+            net_fig,
+            use_container_width=True,
+            config={'displayModeBar': False})
+
+        # Now check for public IPs additionally
+        if 'ip_address' in df.columns:
+            skip = ('192.168', '10.', '172.',
+                    '127.', '0.', '-', 'UNKNOWN')
+            pub = [
+                ip for ip in
+                df['ip_address'].dropna().unique()
+                if ip and not any(
+                    ip.startswith(s) for s in skip)]
+
+            if pub and 'if_flag' in df.columns:
+                st.markdown(
+                    '<div class="sec-label">'
+                    'External IP Origins</div>',
+                    unsafe_allow_html=True)
+                sus_ips = (
+                    df[df['if_flag'] == 1]['ip_address']
+                    .dropna().unique().tolist())
+                with st.spinner(
+                        "Resolving external IP locations..."):
+                    locs = geolocate_ips(pub[:30])
+                if locs:
+                    loc_df = pd.DataFrame(locs)
+                    loc_df['type'] = loc_df['ip'].apply(
+                        lambda x: 'Suspicious'
+                        if x in sus_ips else 'Normal')
+                    ext_map = px.scatter_geo(
+                        loc_df,
+                        lat='lat', lon='lon',
+                        color='type',
+                        color_discrete_map={
+                            'Suspicious': ACCENT,
+                            'Normal': SUCCESS},
+                        hover_data={
+                            'ip': True,
+                            'country': True,
+                            'city': True},
+                        projection='natural earth')
+                    ext_map.update_layout(
+                        geo=dict(
+                            bgcolor='rgba(0,0,0,0)',
+                            landcolor='#1a2035',
+                            oceancolor='#0a0c14',
+                            showocean=True,
+                            showland=True,
+                            showcountries=True,
+                            countrycolor=BORDER,
+                            showframe=False),
+                        paper_bgcolor='rgba(0,0,0,0)',
+                        margin=dict(l=0, r=0, t=0, b=0),
+                        height=350)
+                    st.plotly_chart(
+                        ext_map,
+                        use_container_width=True,
+                        config={'displayModeBar': False})
+
     preview_json = st.session_state.flagged_preview
     if preview_json:
         flagged = pd.read_json(
@@ -1656,7 +2428,7 @@ with st.sidebar:
     pages = [
         ("Dashboard", "Overview and KPIs"),
         ("Analysis", "Run file analysis"),
-        ("Threat Overview", "Threat panels and graph"),
+        ("Threat Overview", "Attack path visualization"),
         ("Findings", "Forensic findings"),
         ("Report", "Export report"),
         ("Live Monitor", "Real-time mode"),
@@ -1687,7 +2459,7 @@ with st.sidebar:
     st.markdown(
         f'<div style="padding:0 12px;'
         f'margin-top:8px">'
-        f'<div style="font-size:9px;'
+        f'<div style="font-size:11px;'
         f'font-weight:700;color:{TXT3};'
         f'letter-spacing:2px;'
         f'text-transform:uppercase;'
@@ -1894,6 +2666,245 @@ if page == 'Dashboard':
 </div>
 """, unsafe_allow_html=True)
 
+    if done and st.session_state.df_result is not None:
+        df_r = st.session_state.df_result
+        comp = 'UNKNOWN'
+        if 'computer' in df_r.columns:
+            comp = (df_r['computer'].mode().iloc[0]
+                    if len(df_r) > 0 else 'UNKNOWN')
+
+        st.markdown(f"""
+<div style="
+    background:{SURFACE};
+    border:1px solid {BORDER};
+    border-radius:8px;
+    padding:16px 24px;
+    margin:12px 0;
+    display:flex;
+    align-items:center;
+    gap:20px">
+    <div style="
+        width:10px;height:10px;
+        background:{ACCENT};
+        border-radius:50%;
+        box-shadow:0 0 8px {ACCENT};
+        flex-shrink:0"></div>
+    <div>
+        <div style="
+            font-size:11px;
+            font-weight:700;
+            color:{TXT3};
+            letter-spacing:1.5px;
+            text-transform:uppercase;
+            margin-bottom:3px">
+            Forensic Subject
+        </div>
+        <div style="
+            font-size:14px;
+            font-weight:700;
+            color:{TXT1};
+            font-family:'JetBrains Mono',monospace">
+            {comp}
+        </div>
+    </div>
+    <div style="margin-left:auto;text-align:right">
+        <div style="
+            font-size:11px;
+            color:{TXT3};
+            margin-bottom:3px">
+            Analysis Time
+        </div>
+        <div style="
+            font-size:12px;
+            color:{TXT2};
+            font-family:'JetBrains Mono',monospace">
+            {st.session_state.analysis_time or 'N/A'}
+        </div>
+    </div>
+</div>
+""", unsafe_allow_html=True)
+
+    st.markdown(
+        '<div class="sec-label">'
+        'Processing Overview</div>',
+        unsafe_allow_html=True)
+
+    g1, g2, g3 = st.columns(3)
+
+    with g1:
+        gauge = make_processing_gauge(
+            DEMO['total'] if not done
+            else len(st.session_state.df_result)
+            if st.session_state.df_result is not None
+            else DEMO['total'],
+            DEMO['anomalies'] if not done
+            else st.session_state.anomaly_count)
+        st.plotly_chart(
+            gauge,
+            use_container_width=True,
+            config={'displayModeBar': False})
+
+    with g2:
+        # Log Classification donut
+        if done and st.session_state.df_result is not None:
+            df_r = st.session_state.df_result
+            if 'event_id' in df_r.columns:
+                cats = {
+                    'Critical (1102/4719)': len(df_r[
+                        df_r['is_critical_event']==1])
+                    if 'is_critical_event' in df_r.columns
+                    else 0,
+                    'Anomalous': st.session_state.anomaly_count,
+                    'Normal': (
+                        len(df_r) -
+                        st.session_state.anomaly_count),
+                }
+        else:
+            cats = {
+                'Critical': 7,
+                'Anomalous': 284,
+                'Normal': 31367,
+            }
+
+        cat_colors = [ACCENT, WARN, SUCCESS]
+        fig_class = go.Figure(go.Pie(
+            labels=list(cats.keys()),
+            values=list(cats.values()),
+            hole=0.6,
+            marker=dict(
+                colors=cat_colors,
+                line=dict(width=0)),
+            textinfo='percent',
+            textfont=dict(
+                size=11,
+                color='white'),
+            hovertemplate=(
+                '%{label}<br>'
+                '%{value:,} events<br>'
+                '%{percent}'
+                '<extra></extra>')))
+        fig_class.add_annotation(
+            text=(
+                f"{cats.get('Critical', 7)}<br>"
+                f"<span style='font-size:11px'>"
+                f"Critical</span>"),
+            x=0.5, y=0.5,
+            font=dict(
+                size=22,
+                color=TXT1,
+                family='Inter'),
+            showarrow=False)
+        fig_class.update_layout(
+            plot_bgcolor='rgba(0,0,0,0)',
+            paper_bgcolor='rgba(0,0,0,0)',
+            font=dict(
+                family='Inter',
+                color=TXT2,
+                size=12),
+            title=dict(
+                text='Log Classification',
+                font=dict(
+                    size=14,
+                    color=TXT1)),
+            margin=dict(l=0, r=0, t=40, b=0),
+            height=280,
+            legend=dict(
+                bgcolor='rgba(0,0,0,0)',
+                font=dict(size=11)))
+        st.plotly_chart(
+            fig_class,
+            use_container_width=True,
+            config={'displayModeBar': False})
+
+    with g3:
+        # Log Event and Alarm Trend
+        if done and st.session_state.df_result is not None:
+            df_r = st.session_state.df_result
+            if 'time_created' in df_r.columns:
+                df_r = df_r.copy()
+                df_r['time_created'] = pd.to_datetime(
+                    df_r['time_created'], utc=True,
+                    errors='coerce')
+                df_r['hour'] = df_r[
+                    'time_created'].dt.floor('h')
+                hourly = df_r.groupby('hour').agg(
+                    total=('event_id', 'count'),
+                    anomalies=('if_flag', 'sum')
+                    if 'if_flag' in df_r.columns
+                    else ('event_id', 'count')
+                ).reset_index()
+            else:
+                hourly = None
+        else:
+            hourly = None
+
+        if hourly is not None and len(hourly) > 0:
+            fig_trend = go.Figure()
+            fig_trend.add_trace(go.Scatter(
+                x=hourly['hour'],
+                y=hourly['total'],
+                name='All Events',
+                line=dict(color=CYAN, width=2),
+                fill='tozeroy',
+                fillcolor='rgba(0,212,255,0.06)'))
+            if 'anomalies' in hourly.columns:
+                fig_trend.add_trace(go.Scatter(
+                    x=hourly['hour'],
+                    y=hourly['anomalies'],
+                    name='Anomalies',
+                    line=dict(
+                        color=ACCENT,
+                        width=2)))
+        else:
+            # Demo trend
+            hours = pd.date_range(
+                '2026-08-25 08:00',
+                periods=12, freq='h')
+            total = [120, 145, 132, 189, 210,
+                     180, 156, 234, 198, 167,
+                     143, 121]
+            alarms = [2, 1, 3, 8, 12, 7,
+                      4, 15, 9, 5, 3, 2]
+            fig_trend = go.Figure()
+            fig_trend.add_trace(go.Scatter(
+                x=hours, y=total,
+                name='All Events',
+                line=dict(color=CYAN, width=2),
+                fill='tozeroy',
+                fillcolor='rgba(0,212,255,0.06)'))
+            fig_trend.add_trace(go.Scatter(
+                x=hours, y=alarms,
+                name='Alarms',
+                line=dict(color=ACCENT, width=2)))
+
+        fig_trend.update_layout(
+            plot_bgcolor='rgba(0,0,0,0)',
+            paper_bgcolor='rgba(0,0,0,0)',
+            font=dict(
+                family='Inter',
+                color=TXT2,
+                size=12),
+            title=dict(
+                text='Log and Alarm Trend',
+                font=dict(
+                    size=14,
+                    color=TXT1)),
+            legend=dict(
+                bgcolor='rgba(0,0,0,0)',
+                font=dict(size=11)),
+            margin=dict(l=0, r=0, t=40, b=0),
+            height=280,
+            xaxis=dict(
+                gridcolor=BORDER,
+                linecolor=BORDER),
+            yaxis=dict(
+                gridcolor=BORDER,
+                linecolor=BORDER))
+        st.plotly_chart(
+            fig_trend,
+            use_container_width=True,
+            config={'displayModeBar': False})
+
     # VERDICT BANNER
     vt_desc = {
         "COMPROMISED": (
@@ -2096,10 +3107,7 @@ elif page == 'Threat Overview':
 <div class="top-bar">
     <div class="top-bar-title">Threat Overview</div>
     <div class="top-bar-meta">
-        <span>
-            {'Live analysis data'
-             if done else 'Upload a file on Analysis first'}
-        </span>
+        <span>Attack path and knowledge graph</span>
     </div>
 </div>
 """, unsafe_allow_html=True)
@@ -2108,35 +3116,318 @@ elif page == 'Threat Overview':
         '<div class="page-wrap">',
         unsafe_allow_html=True)
 
-    if not done or not st.session_state.threat_panels:
+    if not done or st.session_state.df_result is None:
         st.info(
             "No analysis has been run yet. "
-            "Go to Analysis, upload a CSV file, "
-            "then return here for threat panels.")
+            "Go to Analysis, upload a file, "
+            "then return here.")
     else:
-        theme_tokens = {
-            'bg': BG,
-            'accent': ACCENT,
-            'cyan': CYAN,
-            'success': SUCCESS,
-            'warn': WARN,
-            'border': BORDER,
-            'txt1': TXT1,
-            'txt2': TXT2,
-            'txt3': TXT3,
-            'surface': SURFACE,
-        }
-        render_threat_overview(
-            st.session_state.threat_panels,
-            theme_tokens)
+        df_r = st.session_state.df_result
+        vt = st.session_state.verdict
+        findings = st.session_state.findings
 
-        flagged_json = st.session_state.flagged_preview
-        if flagged_json:
-            from dashboard.utils.threat_render import (
-                render_flagged_events_table)
-            flagged_df = pd.read_json(
-                io.StringIO(flagged_json), orient='split')
-            render_flagged_events_table(flagged_df, theme_tokens)
+        # KNOWLEDGE GRAPH using plotly
+        st.markdown(
+            '<div class="sec-label">'
+            'Attack Knowledge Graph</div>',
+            unsafe_allow_html=True)
+        st.caption(
+            "Visual representation of detected "
+            "attack sequence and connections "
+            "between suspicious events.")
+
+        # Build nodes and edges dynamically
+        # from actual analysis results
+        nodes = []
+        edges = []
+        node_colors = []
+        node_sizes = []
+        node_text = []
+
+        # Always start with system node
+        nodes.append("Windows\nEvent Logs")
+        node_colors.append(CYAN)
+        node_sizes.append(40)
+        node_text.append(
+            f"Source: Windows Event Logs<br>"
+            f"Total Records: {len(df_r):,}<br>"
+            f"Time Range: Log file analyzed")
+
+        # Add HMAC node
+        hmac_status = (
+            "COMPROMISED"
+            if st.session_state.deleted_count > 0
+            else "INTACT")
+        hmac_color = (
+            ACCENT if hmac_status == "COMPROMISED"
+            else SUCCESS)
+        nodes.append(
+            f"HMAC Chain\n{hmac_status}")
+        node_colors.append(hmac_color)
+        node_sizes.append(35)
+        node_text.append(
+            f"Layer 1: Cryptographic Chain<br>"
+            f"Status: {hmac_status}<br>"
+            f"Deleted Records: "
+            f"{st.session_state.deleted_count}<br>"
+            f"Injected Records: "
+            f"{st.session_state.injected_count}")
+        edges.append((0, 1))
+
+        # Add critical events if found
+        crv = st.session_state.critical_count
+        n1102 = 0
+        if 'event_id' in df_r.columns:
+            n1102 = (df_r['event_id'] == 1102).sum()
+            n4719 = (df_r['event_id'] == 4719).sum()
+
+            if n1102 > 0:
+                nodes.append(
+                    f"Event 1102\nLog Cleared x{n1102}")
+                node_colors.append(ACCENT)
+                node_sizes.append(32)
+                node_text.append(
+                    f"Event ID: 1102<br>"
+                    f"Name: Security Log Cleared<br>"
+                    f"Count: {n1102} instance(s)<br>"
+                    f"Severity: CRITICAL<br>"
+                    f"Meaning: Attacker erased evidence")
+                edges.append((1, len(nodes)-1))
+
+            if n4719 > 0:
+                nodes.append(
+                    f"Event 4719\nPolicy Changed x{n4719}")
+                node_colors.append(WARN)
+                node_sizes.append(30)
+                node_text.append(
+                    f"Event ID: 4719<br>"
+                    f"Name: Audit Policy Changed<br>"
+                    f"Count: {n4719} instance(s)<br>"
+                    f"Severity: HIGH<br>"
+                    f"Meaning: Logging was disabled")
+                edges.append((1, len(nodes)-1))
+
+        # Add suspicious process nodes
+        if 'process_name' in df_r.columns:
+            tools = ['wevtutil', 'whoami',
+                     'net.exe', 'psexec']
+            for tool in tools:
+                mask = (df_r['process_name']
+                        .str.lower()
+                        .str.contains(
+                            tool, na=False))
+                count = mask.sum()
+                if count > 0:
+                    nodes.append(
+                        f"{tool}\nx{count}")
+                    node_colors.append(WARN)
+                    node_sizes.append(28)
+                    node_text.append(
+                        f"Process: {tool}<br>"
+                        f"Executions: {count}<br>"
+                        f"Risk: Attack tool<br>"
+                        f"Meaning: Used for "
+                        f"post-exploitation")
+                    edges.append((
+                        2 if n1102 > 0 else 1,
+                        len(nodes)-1))
+
+        # Add AI detection node
+        anom = st.session_state.anomaly_count
+        ai_col = WARN if anom > 0 else SUCCESS
+        nodes.append(
+            f"AI Detection\n{anom} Anomalies")
+        node_colors.append(ai_col)
+        node_sizes.append(35)
+        node_text.append(
+            f"Layer 2: AI/ML Detection<br>"
+            f"Model: Isolation Forest<br>"
+            f"Anomalies: {anom:,}<br>"
+            f"Rate: "
+            f"{anom/max(len(df_r),1)*100:.1f}%<br>"
+            f"LSTM: Pending<br>"
+            f"Autoencoder: Pending")
+        edges.append((0, len(nodes)-1))
+
+        # Add verdict node
+        vc_color = (
+            ACCENT if vt == "COMPROMISED"
+            else WARN if vt == "SUSPICIOUS"
+            else SUCCESS)
+        nodes.append(f"Verdict\n{vt}")
+        node_colors.append(vc_color)
+        node_sizes.append(40)
+        node_text.append(
+            f"Final Verdict: {vt}<br>"
+            f"Confidence: HIGH<br>"
+            f"Based on: HMAC + AI analysis<br>"
+            f"Action: See Findings page")
+        edges.append((1, len(nodes)-1))
+        edges.append((len(nodes)-2, len(nodes)-1))
+
+        # Create layout positions
+        import math
+        n = len(nodes)
+        pos_x = []
+        pos_y = []
+        for i, node in enumerate(nodes):
+            if i == 0:
+                pos_x.append(0)
+                pos_y.append(0)
+            elif i == 1:
+                pos_x.append(2)
+                pos_y.append(0)
+            elif i == len(nodes) - 2:
+                pos_x.append(2)
+                pos_y.append(-2)
+            elif i == len(nodes) - 1:
+                pos_x.append(4)
+                pos_y.append(0)
+            else:
+                angle = (
+                    (i - 2) /
+                    max(n - 4, 1) * math.pi - math.pi/2)
+                pos_x.append(
+                    2 + 1.5 * math.cos(angle))
+                pos_y.append(
+                    1.5 * math.sin(angle))
+
+        # Build edge traces
+        edge_traces = []
+        for e in edges:
+            if e[0] < len(pos_x) and e[1] < len(pos_x):
+                edge_traces.append(go.Scatter(
+                    x=[pos_x[e[0]],
+                       pos_x[e[1]], None],
+                    y=[pos_y[e[0]],
+                       pos_y[e[1]], None],
+                    mode='lines',
+                    line=dict(
+                        width=1.5,
+                        color=BORDER),
+                    hoverinfo='none',
+                    showlegend=False))
+
+        # Node trace
+        node_trace = go.Scatter(
+            x=pos_x,
+            y=pos_y,
+            mode='markers+text',
+            hoverinfo='text',
+            hovertext=node_text,
+            text=nodes,
+            textposition='top center',
+            textfont=dict(
+                size=12,
+                color=TXT1,
+                family='Inter'),
+            marker=dict(
+                size=[s * 2 for s in node_sizes],
+                color=node_colors,
+                line=dict(
+                    width=2,
+                    color=SURFACE),
+                opacity=0.9),
+            showlegend=False)
+
+        fig_kg = go.Figure(
+            data=edge_traces + [node_trace])
+        fig_kg.update_layout(
+            plot_bgcolor='rgba(0,0,0,0)',
+            paper_bgcolor='rgba(0,0,0,0)',
+            font=dict(
+                family='Inter',
+                color=TXT2),
+            showlegend=False,
+            hovermode='closest',
+            margin=dict(l=20, r=20, t=20, b=20),
+            height=500,
+            xaxis=dict(
+                showgrid=False,
+                zeroline=False,
+                showticklabels=False,
+                showline=False),
+            yaxis=dict(
+                showgrid=False,
+                zeroline=False,
+                showticklabels=False,
+                showline=False))
+
+        st.plotly_chart(
+            fig_kg,
+            use_container_width=True,
+            config={'displayModeBar': False})
+
+        st.caption(
+            "Hover over any node to see detailed "
+            "information. Node size indicates "
+            "severity. Red nodes are critical, "
+            "amber nodes are high risk, "
+            "green nodes are clean.")
+
+        # ATTACK TIMELINE TABLE
+        st.markdown(
+            '<div class="sec-label">'
+            'Attack Sequence Timeline</div>',
+            unsafe_allow_html=True)
+
+        timeline_events = []
+
+        if 'time_created' in df_r.columns:
+            if 'event_id' in df_r.columns:
+                critical_rows = df_r[
+                    df_r['is_critical_event'] == 1
+                ].copy() if 'is_critical_event' in df_r.columns else pd.DataFrame()
+
+                if len(critical_rows) > 0:
+                    for _, row in critical_rows.head(
+                            10).iterrows():
+                        eid = int(row['event_id'])
+                        meaning = {
+                            1102: "Security log was cleared",
+                            4719: "Audit policy was changed",
+                            4624: "Successful logon",
+                            4625: "Failed logon attempt",
+                            4688: "New process created",
+                            4663: "File access attempt",
+                            4672: "Special privileges used",
+                            4698: "Scheduled task created"
+                        }.get(eid, f"Event {eid}")
+
+                        sev = (
+                            "CRITICAL"
+                            if eid in [1102, 4719]
+                            else "HIGH"
+                            if eid in [4625, 4698]
+                            else "MEDIUM")
+
+                        timeline_events.append({
+                            'Time': str(
+                                row['time_created']
+                            )[:19],
+                            'Event ID': eid,
+                            'Account': str(
+                                row.get(
+                                    'account_name',
+                                    'UNKNOWN')),
+                            'Process': str(
+                                row.get(
+                                    'process_name',
+                                    'UNKNOWN')),
+                            'What Happened': meaning,
+                            'Severity': sev
+                        })
+
+            if timeline_events:
+                tl_df = pd.DataFrame(timeline_events)
+                st.dataframe(
+                    tl_df,
+                    use_container_width=True,
+                    hide_index=True)
+            else:
+                st.caption(
+                    "No critical sequence events "
+                    "found in this dataset.")
 
     st.markdown('</div>', unsafe_allow_html=True)
 

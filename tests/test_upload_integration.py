@@ -9,9 +9,11 @@ from src.features import extract_features
 from src.hmac_chain import verify_hmac_chain, check_chain_continuity
 from src.models.isolation_forest import predict_anomalies
 
-CLEAN_CSV = (
+DATA_DIR = os.environ.get(
+    'LOGSHIELD_DATA_DIR',
     r'C:\Users\shrey\OneDrive\Desktop\fdb_logshied'
-    r'\logshield_master_clean.csv')
+)
+CLEAN_CSV = os.path.join(DATA_DIR, 'logshield_master_clean.csv')
 
 
 def test_full_clean_csv_upload_pipeline():

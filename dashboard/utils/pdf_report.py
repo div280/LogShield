@@ -214,7 +214,29 @@ def generate_pdf_report(
         summary_map.get(verdict, ""),
         body))
 
+    from dashboard.utils.threat_panels import build_lstm_panel_data
+
     section("2. QUANTITATIVE FINDINGS")
+
+    lstm_count = (
+        int(df['lstm_flag'].sum())
+        if 'lstm_flag' in df.columns
+        else 0)
+    lstm_status = (
+        "HIGH" if lstm_count > 0
+        else "PASS" if 'lstm_flag' in df.columns
+        else "N/A")
+
+    lstm_panel = build_lstm_panel_data(df) if ('lstm_flag' in df.columns and len(df) > 0) else None
+    if lstm_panel and lstm_panel.get('blocks'):
+        h_cnt = lstm_panel.get('high_count', 0)
+        m_cnt = lstm_panel.get('medium_count', 0)
+        l_cnt = lstm_panel.get('low_count', 0)
+        severity_str = f"{h_cnt} High, {m_cnt} Medium, {l_cnt} Low"
+        severity_status = "HIGH" if h_cnt > 0 else "WARN" if m_cnt > 0 else "INFO"
+    else:
+        severity_str = "None" if 'lstm_flag' in df.columns else "N/A"
+        severity_status = "PASS" if 'lstm_flag' in df.columns else "N/A"
 
     metrics_data = [
         ["Metric", "Value", "Status"],
@@ -229,6 +251,12 @@ def generate_pdf_report(
         ["AI Anomalies Detected",
          f"{anomaly_count:,}",
          "HIGH" if anomaly_count > 0 else "PASS"],
+        ["Order Violations (LSTM)",
+         f"{lstm_count:,}" if 'lstm_flag' in df.columns else "N/A",
+         lstm_status],
+        ["LSTM Region Severity",
+         severity_str,
+         severity_status],
         ["Critical Events (1102/4719)",
          f"{critical_count:,}",
          "HIGH" if critical_count > 0 else "PASS"],

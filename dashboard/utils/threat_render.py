@@ -6,6 +6,7 @@ reliable Streamlit embedding without extra JS dependencies.
 """
 import streamlit as st
 import plotly.graph_objects as go
+import pandas as pd
 
 
 def _plotly_base(t, height=300):
@@ -407,16 +408,18 @@ def render_flagged_events_table(flagged_df, t):
 
     st.caption(
         'Sort by any column to inspect individual records. '
-        'Reason reflects the LogShield attack category assigned '
-        'by the Isolation Forest layer.')
+        'Reason reflects evidence from LSTM event ordering, '
+        'HMAC cryptographic verification, and Isolation Forest.')
+
+    display_df = flagged_df.head(500)
     st.dataframe(
-        flagged_df,
+        display_df,
         use_container_width=True,
         hide_index=True,
         column_config={
             'timestamp': st.column_config.TextColumn(
                 'Timestamp',
-                help='When this event was recorded in the log'),
+                help='When this event was recorded in the log (UTC)'),
             'event_id': st.column_config.NumberColumn(
                 'Event ID',
                 help='Windows Security Event ID number'),
@@ -425,10 +428,21 @@ def render_flagged_events_table(flagged_df, t):
                 help='User or service account associated with the event'),
             'reason_flagged': st.column_config.TextColumn(
                 'Reason Flagged',
-                help=(
-                    'LogShield category: Gap, Shuffle, Injection, '
-                    'or Critical Event')),
+                help='Forensic evidence finding for this record'),
         })
+
+    if len(flagged_df) > 500:
+        st.caption(f"Showing 500 of {len(flagged_df)} flagged events, strongest evidence first.")
+
+    csv_bytes = flagged_df.to_csv(index=False).encode('utf-8-sig')
+    st.download_button(
+        label=f"Download all {len(flagged_df)} flagged events (CSV)",
+        data=csv_bytes,
+        file_name="flagged_events.csv",
+        mime="text/csv",
+        key="download_flagged_events_render_csv"
+    )
+
     _card_close()
 
 
@@ -460,3 +474,173 @@ def render_threat_overview(panels, tokens):
 
     render_knowledge_graph(
         panels.get('knowledge_graph', {}), t, height=420)
+
+
+def render_lstm_panel(lstm_data: dict, t: dict, height: int = 320):
+    """
+    Render Event Order Check (LSTM) panel in dark/light SIEM card styling.
+    Strict UI Rules: No em dashes, no emojis.
+
+    Parameters:
+        lstm_data (dict): Output from build_lstm_panel_data.
+        t (dict): Color and style tokens.
+        height (int): Plotly chart height (default: 320).
+
+    Time Complexity: O(n) where n is data rows.
+    Space Complexity: O(n) for chart traces.
+    """
+    _card_open('Event Order Check (LSTM)', t)
+
+    summary = lstm_data.get('summary', 'No unusual event ordering was found.')
+    rows_flagged = lstm_data.get('rows_flagged', 0)
+    status = lstm_data.get('status', 'ok')
+
+    # Summary Callout Banner
+    if status == 'notice' or status == 'unavailable':
+        banner_border = t['txt3']
+        banner_bg = 'rgba(107,114,128,0.1)'
+        banner_title = 'Notice'
+        banner_color = t['txt2']
+    elif rows_flagged > 0:
+        banner_border = t['accent']
+        banner_bg = 'rgba(232,52,58,0.1)'
+        banner_title = 'Sequence Anomaly Detected'
+        banner_color = t['accent']
+    else:
+        banner_border = t['success']
+        banner_bg = 'rgba(0,200,83,0.1)'
+        banner_title = 'Sequence Order Intact'
+        banner_color = t['success']
+
+    st.markdown(f"""
+<div style="background:{banner_bg};border-left:4px solid {banner_border};padding:12px 16px;border-radius:6px;margin-bottom:16px">
+    <div style="font-size:12px;font-weight:700;letter-spacing:1px;color:{banner_color};text-transform:uppercase;margin-bottom:4px">
+        {banner_title}
+    </div>
+    <div style="font-size:13px;line-height:1.5;color:{t['txt1']}">
+        {summary}
+    </div>
+</div>
+""", unsafe_allow_html=True)
+
+    # Flagged Blocks Table
+    blocks = lstm_data.get('blocks', [])
+    if blocks:
+        st.markdown(
+            f'<div style="font-size:11px;font-weight:700;letter-spacing:1.5px;color:{t["txt3"]};'
+            f'text-transform:uppercase;margin-bottom:8px">Flagged Sequence Blocks ({len(blocks)})</div>',
+            unsafe_allow_html=True)
+        block_df = pd.DataFrame(blocks)
+        block_df = block_df.rename(columns={
+            'start_time': 'Start Time',
+            'end_time': 'End Time',
+            'event_count': 'Events in Block',
+            'highest_score': 'Max Anomaly Score',
+            'meaning': 'Assessment',
+            'action': 'Recommended Action',
+            'severity': 'Severity'
+        })
+        display_df = block_df.head(50)
+        st.dataframe(display_df, use_container_width=True, hide_index=True)
+        if len(block_df) > 50:
+            st.caption(f"Showing the 50 strongest of {len(block_df)} regions. Use the button below for the full list.")
+
+        # Download full CSV under the table
+        csv_bytes = block_df.to_csv(index=False).encode('utf-8-sig')
+        st.download_button(
+            label=f"Download all {len(block_df)} flagged regions (CSV)",
+            data=csv_bytes,
+            file_name="lstm_flagged_regions.csv",
+            mime="text/csv",
+            key="download_lstm_blocks_csv"
+        )
+
+
+    # Plotly Timeline / Score Chart
+    tl = lstm_data.get('timeline_data')
+    if tl and len(tl.get('times', [])) > 0:
+        st.markdown(
+            f'<div style="font-size:11px;font-weight:700;letter-spacing:1.5px;color:{t["txt3"]};'
+            f'text-transform:uppercase;margin-top:12px;margin-bottom:6px">Sequence Anomaly Score Timeline</div>',
+            unsafe_allow_html=True)
+
+        times = tl['times']
+        scores = tl['scores']
+        flags = tl['flags']
+        threshold = tl['threshold']
+
+        norm_times = [times[i] for i in range(len(times)) if flags[i] == 0]
+        norm_scores = [scores[i] for i in range(len(scores)) if flags[i] == 0]
+
+        anom_times = [times[i] for i in range(len(times)) if flags[i] == 1]
+        anom_scores = [scores[i] for i in range(len(scores)) if flags[i] == 1]
+
+        fig = go.Figure()
+        if norm_times:
+            fig.add_trace(go.Scattergl(
+                x=norm_times,
+                y=norm_scores,
+                mode='markers',
+                name='Normal Sequence',
+                marker=dict(color=t['cyan'], size=4, opacity=0.5),
+                hovertemplate='Time: %{x}<br>LSTM Score: %{y:.4f}<br>Normal sequence pattern<extra>Normal</extra>'
+            ))
+        if anom_times:
+            fig.add_trace(go.Scattergl(
+                x=anom_times,
+                y=anom_scores,
+                mode='markers',
+                name=f'Out of Order ({len(anom_times):,})',
+                marker=dict(color=t['accent'], size=9, symbol='diamond', line=dict(color=t['txt1'], width=1)),
+                hovertemplate='Time: %{x}<br>LSTM Score: %{y:.4f}<br>Sequence order violation<extra>ANOMALY</extra>'
+            ))
+
+        fig.add_shape(
+            type='line',
+            xref='paper', x0=0, x1=1,
+            yref='y', y0=threshold, y1=threshold,
+            line=dict(color=t['warn'], dash='dash', width=1.5)
+        )
+        fig.add_annotation(
+            xref='paper', x=1, y=threshold, yref='y',
+            showarrow=False, text=f'Threshold ({threshold:.4f})',
+            xanchor='left', font=dict(color=t['warn'], size=10)
+        )
+        fig.update_layout(
+            **_plotly_base(t, height),
+            title=dict(
+                text=f"LSTM Sequence Reconstruction Error ({rows_flagged:,} flagged / {lstm_data.get('rows_checked', 0):,} checked)",
+                font=dict(size=12, color=t['txt1'])
+            ),
+            xaxis=dict(
+                gridcolor=t['border'],
+                linecolor=t['border'],
+                tickfont=dict(color=t['txt2']),
+                title=dict(text='Log Timestamp', font=dict(size=10, color=t['txt2']))
+            ),
+            yaxis=dict(
+                gridcolor=t['border'],
+                linecolor=t['border'],
+                tickfont=dict(color=t['txt2']),
+                title=dict(text='Reconstruction MSE', font=dict(size=10, color=t['txt2']))
+            ),
+            showlegend=True,
+            legend=dict(orientation='h', y=1.12, x=0, bgcolor='rgba(0,0,0,0)', font=dict(size=10))
+        )
+        st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
+
+    # Raw Details Expander (collapsed by default)
+    with st.expander("LSTM Sequence Statistics (Raw Numbers)", expanded=False):
+        c1, c2, c3, c4, c5 = st.columns(5)
+        with c1:
+            st.metric("Rows Checked", f"{lstm_data.get('rows_checked', 0):,}")
+        with c2:
+            st.metric("Rows Flagged", f"{lstm_data.get('rows_flagged', 0):,}")
+        with c3:
+            st.metric("Max Anomaly Score", f"{lstm_data.get('max_score', 0.0):.4f}")
+        with c4:
+            st.metric("Mean Anomaly Score", f"{lstm_data.get('mean_score', 0.0):.4f}")
+        with c5:
+            st.metric("Threshold Used", f"{lstm_data.get('threshold', 0.1283):.4f}")
+
+    _card_close()

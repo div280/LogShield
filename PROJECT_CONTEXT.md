@@ -369,3 +369,20 @@ BUILD → TEST → FIX → RETEST → APPROVE → NEXT PHASE
 - [ ] Phase 5 — Score fusion + live tail watcher
 - [x] Phase 6 complete enterprise dashboard
 - [ ] Phase 7 — Deployment to Streamlit Cloud
+
+---
+
+## Phase 4 Status Update & Architecture Notes
+- LSTM autoencoder implementation complete (sequence features: f_dt, f_rid, hour_of_day; window size 10; anomaly threshold loaded from lstm_meta.pkl; model artifacts lstm_ae.keras and lstm_meta.pkl saved in models_saved/ and gitignored).
+- Dashboard pipeline runs LSTM inference on ORIGINAL uploaded event order before any sorting steps to properly detect shuffle attacks.
+- File-level LSTM alert rule: rows >= 500 AND flagged row fraction > 3% AND flagged contiguous blocks >= 3.
+- Verdict rules:
+  1. Identity-based baseline matching: at least 50% of the file's keys (event_record_id, time_created) must appear in the chain.
+  2. Baseline matches and verification fails -> COMPROMISED.
+  3. Baseline matches and chain intact -> CLEAN unless the file-level LSTM alert fires (which yields SUSPICIOUS).
+  4. Baseline does not match -> SUSPICIOUS ("HMAC could not be verified against a baseline"); deleted/injected shown as not available. Never COMPROMISED or CLEAN.
+  5. Missing key columns fail closed to SUSPICIOUS.
+- Isolation Forest is supporting forensic evidence only and does not change the integrity verdict independently.
+- Known limitation: HMAC verification runs in time order, so pure reorder attacks are caught by the Event Order Check (LSTM).
+- Environment note: Runtime is Python 3.12, TensorFlow 2.20, Keras 3.12, while requirements.txt still pins legacy versions (requires a team decision).
+

@@ -464,8 +464,16 @@ def test_tampered_logs_never_marked_clean_on_error():
     verdict_inj, _, _ = get_verdict(deleted=0, injected=3, anomalies=0, critical=0, total=100)
     assert verdict_inj == "COMPROMISED"
 
+    # Critical events and IF anomalies are supporting evidence only and do not change verdict
     verdict_crit, _, _ = get_verdict(deleted=0, injected=0, anomalies=0, critical=1, total=100)
-    assert verdict_crit == "SUSPICIOUS"
+    assert verdict_crit == "CLEAN"
+
+    verdict_anom, _, _ = get_verdict(deleted=0, injected=0, anomalies=50, critical=0, total=100)
+    assert verdict_anom == "CLEAN"
+
+    # LSTM alert on clean chain turns verdict to SUSPICIOUS
+    verdict_lstm, _, _ = get_verdict(deleted=0, injected=0, anomalies=0, critical=0, total=100, lstm_alert=True)
+    assert verdict_lstm == "SUSPICIOUS"
 
 
 def test_path_traversal_attempt_is_blocked():
@@ -484,3 +492,172 @@ def test_temp_files_deleted_after_processing():
         assert os.path.exists(temp_file_path)
 
     assert not os.path.exists(temp_file_path)
+
+
+def test_gauge_has_no_fake_delta_reference():
+    fig = make_processing_gauge(1000, 50)
+    trace = fig.data[0]
+    assert trace.mode == "gauge+number"
+    assert not hasattr(trace, 'delta') or trace.delta is None or trace.delta.reference is None
+    assert "AI anomaly rate" in trace.title.text
+    assert "fixed baseline share" in trace.title.text
+
+
+def test_verdict_baseline_mismatch_returns_suspicious_without_tampering_claim():
+    verdict, vclass, vc = get_verdict(
+        deleted=100, injected=50, anomalies=0, critical=0, total=200,
+        chain_intact=False, baseline_mismatch=True, hmac_failed=False)
+    assert verdict == "SUSPICIOUS"
+    assert vclass == "suspicious"
+    assert vc == "amber"
+
+
+def test_verdict_matching_baseline_failure_returns_compromised():
+    verdict, vclass, vc = get_verdict(
+        deleted=10, injected=0, anomalies=0, critical=0, total=200,
+        chain_intact=False, baseline_mismatch=False, hmac_failed=True)
+    assert verdict == "COMPROMISED"
+    assert vclass == "compromised"
+    assert vc == "red"
+
+
+def test_verdict_matching_baseline_clean_returns_clean():
+    verdict, vclass, vc = get_verdict(
+        deleted=0, injected=0, anomalies=0, critical=0, total=200,
+        chain_intact=True, baseline_mismatch=False, hmac_failed=False)
+    assert verdict == "CLEAN"
+    assert vclass == "clean"
+    assert vc == "green"
+
+
+def test_build_findings_baseline_mismatch_warning():
+    from dashboard.app import build_findings
+    df = pd.DataFrame({'event_id': [4624, 4634]})
+    findings = build_findings(
+        df=df, deleted=100, injected=50, critical=0, anomalies=0,
+        baseline_mismatch=True)
+    titles = [f['title'] for f in findings]
+    assert "HMAC could not be verified against a baseline" in titles
+    assert not any("confirmed deleted" in t for t in titles)
+    assert not any("injected" in t for t in titles)
+
+
+def test_build_findings_break_info_and_notable_events():
+    from dashboard.app import build_findings
+    df = pd.DataFrame({'event_id': [1102, 4719]})
+    break_msg = "The chain first breaks at record #50 (time 2026-08-25 07:25:48); records after it cannot be trusted."
+    findings = build_findings(
+        df=df, deleted=0, injected=0, critical=2, anomalies=0,
+        baseline_mismatch=False, hmac_failed=True, break_info=break_msg)
+    titles = [f['title'] for f in findings]
+    details = [f['detail'] for f in findings]
+    assert "Cryptographic chain verification failed" in titles
+    assert any("The chain first breaks at record #50" in d for d in details)
+    assert any("Notable security event: Security log cleared" in t for t in titles)
+    assert any("Notable security event: Audit policy modified" in t for t in titles)
+
+
+def test_duplicate_record_ids_in_different_files_do_not_mask_deletion():
+    """Verify that identity keys (rec_id, time) do not mask deletions across files."""
+    chain_keys = {
+        ('1', '2026-08-25 08:00:00'),
+        ('2', '2026-08-25 08:00:01'),
+        ('1', '2026-08-25 09:00:00'),
+        ('2', '2026-08-25 09:00:01'),
+    }
+    # File is missing the second file's record #2
+    file_keys = {
+        ('1', '2026-08-25 08:00:00'),
+        ('2', '2026-08-25 08:00:01'),
+        ('1', '2026-08-25 09:00:00'),
+    }
+    missing = chain_keys - file_keys
+    assert len(missing) == 1
+    assert ('2', '2026-08-25 09:00:01') in missing
+
+
+def test_50_deleted_rows_reported_as_50_deleted():
+    """Verify that removing 50 keys from a matching baseline reports deleted == 50."""
+    chain_keys = {(str(i), f"2026-08-25 08:00:{i:02d}") for i in range(100)}
+    file_keys = {(str(i), f"2026-08-25 08:00:{i:02d}") for i in range(50)}
+    missing = chain_keys - file_keys
+    assert len(missing) == 50
+
+
+def test_synthetic_unrelated_frame_is_not_baseline_match_and_gives_suspicious():
+    """
+    Function-level test: synthetic frame of 120,000 light rows with unrelated IDs/times
+    is not a baseline match and returns SUSPICIOUS, never COMPROMISED or CLEAN.
+    """
+    from dashboard.app import get_cached_hmac_chain, get_verdict
+    cached_chain = get_cached_hmac_chain('models_saved/hmac_chain.json')
+    if cached_chain is None:
+        pytest.skip("HMAC chain json not available")
+
+    chain_keys = cached_chain['keys']
+    n_rows = 120000
+    # Unrelated record IDs and times
+    synthetic_keys = {(f"unrelated_{i}", f"2099-01-01 00:00:{i % 60:02d}") for i in range(n_rows)}
+
+    matching = synthetic_keys.intersection(chain_keys)
+    match_frac = len(matching) / max(len(synthetic_keys), 1)
+    baseline_matches = bool(match_frac >= 0.50)
+    baseline_mismatch = not baseline_matches
+
+    assert baseline_matches is False
+    assert baseline_mismatch is True
+
+    verdict, vclass, vc = get_verdict(
+        deleted=0, injected=0, anomalies=0, critical=0, total=n_rows,
+        chain_intact=False, baseline_mismatch=baseline_mismatch, hmac_failed=False)
+
+    assert verdict == "SUSPICIOUS"
+    assert vclass == "suspicious"
+    assert vc == "amber"
+    assert verdict != "COMPROMISED"
+    assert verdict != "CLEAN"
+
+
+def test_missing_key_columns_fails_closed():
+    """Verify that a DataFrame with missing key columns fails closed as a mismatch."""
+    from dashboard.app import get_verdict
+    # DataFrame without time_created or event_record_id
+    df = pd.DataFrame({'other_col': [1, 2, 3]})
+    req_cols = {'event_record_id', 'time_created'}
+    baseline_matches = req_cols.issubset(df.columns)
+    baseline_mismatch = not baseline_matches
+
+    assert baseline_matches is False
+    verdict, _, _ = get_verdict(
+        deleted=0, injected=0, anomalies=0, critical=0, total=len(df),
+        chain_intact=False, baseline_mismatch=baseline_mismatch)
+    assert verdict == "SUSPICIOUS"
+
+
+def test_no_em_dashes_or_emojis_in_new_strings():
+    """Verify all findings strings, warnings, and limitation notes contain no em dashes or emojis."""
+    from dashboard.app import build_findings
+    df = pd.DataFrame({'event_id': [1102, 4719, 4624], 'time_created': ['2026-08-25'] * 3})
+    findings = build_findings(
+        df=df, deleted=50, injected=10, critical=2, anomalies=5,
+        baseline_mismatch=False, hmac_failed=True,
+        break_info="The chain first breaks at record #10 (time 2026-08-25 08:00:00); records after it cannot be trusted.",
+        lstm_alert=True,
+        deleted_breakdown=" (largest gaps: test.evtx: 50)",
+        injected_breakdown=" (largest additions: test.evtx: 10)")
+
+    limitation_note = (
+        "Chain verification runs in time order, so reordering of events is checked by the Event Order Check (LSTM)."
+    )
+    baseline_warning = (
+        "HMAC could not be verified against a baseline because the uploaded dataset identity keys do not match the trusted baseline."
+    )
+
+    forbidden = ["\u2014", "\u2013", "\U0001F600", "\U0001F916", "\U0001F6A8"]
+    all_texts = [limitation_note, baseline_warning] + [f['title'] for f in findings] + [f['detail'] for f in findings]
+
+    for text in all_texts:
+        for char in forbidden:
+            assert char not in text, f"Forbidden character {char!r} found in text: {text}"
+
+

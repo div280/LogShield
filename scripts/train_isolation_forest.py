@@ -54,9 +54,11 @@ def main(csv_path: str) -> None:
 
 
 if __name__ == '__main__':
-    default = (
+    data_dir = os.environ.get(
+        'LOGSHIELD_DATA_DIR',
         r'C:\Users\shrey\OneDrive\Desktop\fdb_logshied'
-        r'\logshield_master_clean.csv')
+    )
+    default = os.path.join(data_dir, 'logshield_master_clean.csv')
     parser = argparse.ArgumentParser()
     parser.add_argument('csv_path', nargs='?', default=default)
     args = parser.parse_args()

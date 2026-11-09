@@ -31,28 +31,6 @@ Three models detect semantic and temporal anomalies:
 2. FORENSIC MODE — analyzes recovered .evtx files
    post-incident, produces evidence integrity report
 
-
-## Team Division of Work
-
-Primary ownership means that person leads development
-of that file and runs Antigravity tasks for it.
-Anyone can contribute to any file with prior
-communication to the primary owner.
-
-RULE: Never have two people editing the same file
-simultaneously without coordinating first.
-
-Saviour (Team Lead): parser.py, features.py,
-                     paper writing, project coordination
-kitha:             tamper.py, isolation_forest.py,
-                     live_tail/watcher.py
-sree:           lstm_model.py, autoencoder.py,
-                     Google Colab model training
-shaha + Yaya: dashboard/app.py, fusion.py,
-                     pdf_report.py, deployment
-
-All 4 together: Overleaf paper, PROJECT_CONTEXT.md,
-                testing, code review
 ## Tech Stack — Use Exactly These Versions
 - Python 3.10
 - python-evtx==0.7.4
@@ -359,18 +337,6 @@ Always report what assumptions were made.
 ## Build Model — Follow This Always
 BUILD → TEST → FIX → RETEST → APPROVE → NEXT PHASE
 
-## Current Phase Status — Update As Phases Complete
-- [x] Phase 0 — Project structure setup
-- [x] Phase 1 — EVTX parser + feature engineering
-- [x] Phase 2 — Dataset generation (tamper.py)
-- [x] Phase 3 — Isolation Forest model
-- [x] Phase 3.5 — HMAC-SHA256 chain implementation
-- [ ] Phase 4 — LSTM + Autoencoder models
-- [x] Phase 5 — Score fusion + live tail watcher
-- [x] Phase 6 complete enterprise dashboard
-- [ ] Phase 7 — Deployment to Streamlit Cloud
-
----
 
 ## Phase 5 Status Update & Real-Time Live Architecture Notes
 - Real-time live ingestion engine implemented in `live_tail/watcher.py` with threaded non-blocking queue and dual-mode execution (Live Windows Event Log + Live Simulation/Replay).

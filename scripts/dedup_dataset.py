@@ -63,12 +63,12 @@ def dedup_dataset(input_path: str, output_path: str) -> dict:
 
 
 if __name__ == '__main__':
-    default_in = (
+    data_dir = os.environ.get(
+        'LOGSHIELD_DATA_DIR',
         r'C:\Users\shrey\OneDrive\Desktop\fdb_logshied'
-        r'\logshield_master.csv')
-    default_out = (
-        r'C:\Users\shrey\OneDrive\Desktop\fdb_logshied'
-        r'\logshield_master_clean.csv')
+    )
+    default_in = os.path.join(data_dir, 'logshield_master.csv')
+    default_out = os.path.join(data_dir, 'logshield_master_clean.csv')
     parser = argparse.ArgumentParser()
     parser.add_argument('input', nargs='?', default=default_in)
     parser.add_argument('output', nargs='?', default=default_out)

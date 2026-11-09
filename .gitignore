@@ -10,3 +10,5 @@ models_saved/*.pkl
 models_saved/*.h5
 *.evtx
 *.zip
+
+models_saved/*.keras

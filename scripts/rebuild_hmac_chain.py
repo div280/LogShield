@@ -13,9 +13,11 @@ from src.hmac_chain import (
     check_chain_continuity)
 
 
-DEFAULT_CSV = (
+DATA_DIR = os.environ.get(
+    'LOGSHIELD_DATA_DIR',
     r'C:\Users\shrey\OneDrive\Desktop\fdb_logshied'
-    r'\logshield_master_clean.csv')
+)
+DEFAULT_CSV = os.path.join(DATA_DIR, 'logshield_master_clean.csv')
 CHAIN_PATH = 'models_saved/hmac_chain.json'
 
 

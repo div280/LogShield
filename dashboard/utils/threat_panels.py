@@ -259,44 +259,285 @@ def build_knowledge_graph_data(
 
 def build_flagged_events_table(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Build a sortable preview of flagged events for examiner drill-down.
-
-    Parameters:
-        df (pd.DataFrame): Analyzed log DataFrame with model outputs.
-
-    Returns:
-        pd.DataFrame: Columns for timestamp, event ID, account, reason.
+    Build a sortable table of flagged events for forensic drill-down.
+    Evidence hierarchy:
+      1. LSTM sequence anomaly: 'Event order anomaly (LSTM)'
+      2. HMAC finding (tampered / extra record): 'Record missing or extra compared with baseline (HMAC)'
+      3. Isolation Forest: 'Unusual timing or pattern (low confidence)'
 
     Time Complexity: O(n)
     Space Complexity: O(k) where k is flagged row count
     """
-    if 'if_flag' not in df.columns:
+    if df is None or len(df) == 0:
         return pd.DataFrame(columns=[
             'timestamp', 'event_id', 'account', 'reason_flagged'])
 
-    flagged = df[df['if_flag'] == 1].copy()
-    if len(flagged) == 0:
-        return pd.DataFrame(columns=[
-            'timestamp', 'event_id', 'account', 'reason_flagged'])
+    lstm_flag = df['lstm_flag'].values if 'lstm_flag' in df.columns else np.zeros(len(df), dtype=int)
+    lstm_score = df['lstm_score'].values if 'lstm_score' in df.columns else np.zeros(len(df), dtype=float)
+    if_flag = df['if_flag'].values if 'if_flag' in df.columns else np.zeros(len(df), dtype=int)
 
-    gap_threshold = 60.0
-    if 'delta_t' in df.columns:
-        normal_delta = df[df['if_flag'] == 0]['delta_t']
-        if len(normal_delta) > 0:
-            gap_threshold = float(
-                normal_delta.quantile(GAP_DELTA_PERCENTILE / 100))
+    # Check HMAC findings across standard column names (hmac_flag, hmac_extra, hmac_finding, is_extra)
+    hmac_flag = np.zeros(len(df), dtype=int)
+    if 'hmac_flag' in df.columns:
+        hmac_flag = np.bitwise_or(hmac_flag, (df['hmac_flag'].values == 1).astype(int))
+    if 'hmac_extra' in df.columns:
+        hmac_flag = np.bitwise_or(hmac_flag, (df['hmac_extra'].values == 1).astype(int))
+    if 'hmac_finding' in df.columns:
+        hmac_flag = np.bitwise_or(hmac_flag, (df['hmac_finding'].values == 1).astype(int))
+    if 'is_extra' in df.columns:
+        hmac_flag = np.bitwise_or(hmac_flag, (df['is_extra'].values == 1).astype(int))
 
-    reasons = flagged.apply(
-        lambda r: _assign_log_category(r, gap_threshold), axis=1)
+    is_flagged = (lstm_flag == 1) | (hmac_flag == 1) | (if_flag == 1)
+    if not np.any(is_flagged):
+        cols = ['timestamp', 'event_id', 'account', 'reason_flagged']
+        if 'lstm_flag' in df.columns and 'lstm_score' in df.columns:
+            cols.extend(['lstm_flag', 'lstm_score'])
+        return pd.DataFrame(columns=cols)
+
+    flagged_indices = np.where(is_flagged)[0]
+    flagged_df = df.iloc[flagged_indices].copy()
+
+    f_lstm_flags = lstm_flag[flagged_indices]
+    f_lstm_scores = lstm_score[flagged_indices]
+    f_hmac_flags = hmac_flag[flagged_indices]
+    f_if_flags = if_flag[flagged_indices]
+
+    reasons = []
+    priorities = []
+    sort_scores = []
+
+    for lf, ls, hf, iff in zip(f_lstm_flags, f_lstm_scores, f_hmac_flags, f_if_flags):
+        if lf == 1:
+            reasons.append("Event order anomaly (LSTM)")
+            priorities.append(1)
+            sort_scores.append(float(ls))
+        elif hf == 1:
+            reasons.append("Record missing or extra compared with baseline (HMAC)")
+            priorities.append(2)
+            sort_scores.append(0.0)
+        elif iff == 1:
+            reasons.append("Unusual timing or pattern (low confidence)")
+            priorities.append(3)
+            sort_scores.append(0.0)
+        else:
+            reasons.append("Unusual timing or pattern (low confidence)")
+            priorities.append(3)
+            sort_scores.append(0.0)
+
+    # Format timestamps consistently as YYYY-MM-DD HH:MM:SS
+    if 'time_created' in flagged_df.columns:
+        try:
+            formatted_times = pd.to_datetime(flagged_df['time_created'], utc=True).dt.strftime('%Y-%m-%d %H:%M:%S').fillna('')
+        except Exception:
+            formatted_times = flagged_df['time_created'].astype(str).str.slice(0, 19)
+    else:
+        formatted_times = pd.Series([''] * len(flagged_df), index=flagged_df.index)
+
     out = pd.DataFrame({
-        'timestamp': flagged['time_created'].astype(str),
-        'event_id': flagged['event_id'],
-        'account': flagged.get(
-            'account_name', pd.Series('UNKNOWN', index=flagged.index)),
+        'timestamp': formatted_times.values,
+        'event_id': flagged_df.get('event_id', pd.Series(0, index=flagged_df.index)).values,
+        'account': flagged_df.get(
+            'account_name', pd.Series('UNKNOWN', index=flagged_df.index)).fillna('UNKNOWN').values,
         'reason_flagged': reasons,
     })
-    return out.sort_values(
-        'timestamp', ascending=False).head(500).reset_index(drop=True)
+
+    if 'lstm_flag' in df.columns and 'lstm_score' in df.columns:
+        out['lstm_flag'] = f_lstm_flags
+        out['lstm_score'] = np.round(f_lstm_scores, 4)
+
+    out['_priority'] = priorities
+    out['_sort_score'] = sort_scores
+    out['_sort_time'] = formatted_times.values
+
+    # Order: LSTM rows first by lstm_score descending, then HMAC rows, then IF only rows by timestamp
+    out = out.sort_values(
+        by=['_priority', '_sort_score', '_sort_time'],
+        ascending=[True, False, False]
+    ).drop(columns=['_priority', '_sort_score', '_sort_time']).reset_index(drop=True)
+
+    return out
+
+
+def build_lstm_panel_data(
+        df: pd.DataFrame,
+        threshold: float = 0.1283,
+        notice: str = "") -> dict:
+    """
+    Build primitive data for the LSTM Event Order Check panel.
+
+    Parameters:
+        df (pd.DataFrame): DataFrame containing lstm_score, lstm_flag, time_created.
+        threshold (float): Anomaly score threshold (default: 0.1283).
+        notice (str): Optional notice string if LSTM could not run.
+
+    Returns:
+        dict: Summary, blocks table, raw metrics, and timeline series data.
+
+    Time Complexity: O(n) where n is total rows in df.
+    Space Complexity: O(k) where k is number of flagged blocks / sample points.
+    """
+    if notice:
+        return {
+            'status': 'notice',
+            'summary': notice,
+            'blocks': [],
+            'rows_checked': len(df),
+            'rows_flagged': 0,
+            'max_score': 0.0,
+            'mean_score': 0.0,
+            'threshold': float(threshold),
+            'timeline_data': None,
+        }
+
+    if 'lstm_flag' not in df.columns or len(df) == 0:
+        return {
+            'status': 'unavailable',
+            'summary': "The event order check could not run for this file.",
+            'blocks': [],
+            'rows_checked': len(df),
+            'rows_flagged': 0,
+            'max_score': 0.0,
+            'mean_score': 0.0,
+            'threshold': float(threshold),
+            'timeline_data': None,
+        }
+
+    flag_series = df['lstm_flag'].values
+    score_series = (
+        df['lstm_score'].values
+        if 'lstm_score' in df.columns
+        else np.zeros(len(df), dtype=float)
+    )
+    time_series = (
+        df['time_created'].astype(str).values
+        if 'time_created' in df.columns
+        else np.array([''] * len(df))
+    )
+
+    rows_checked = int(len(df))
+    rows_flagged = int(np.sum(flag_series == 1))
+    max_score = float(np.max(score_series)) if len(score_series) > 0 else 0.0
+    mean_score = float(np.mean(score_series)) if len(score_series) > 0 else 0.0
+
+    def _classify_block(b_score: float):
+        if b_score >= 0.5:
+            return (
+                'High',
+                'Events are strongly out of order here, likely reordered.',
+                'Compare these record IDs and timestamps with other logs from the same machine (System, Application) and with the HMAC chain result.'
+            )
+        elif b_score >= 0.2:
+            return (
+                'Medium',
+                'Events look out of order here, review recommended.',
+                'Compare these record IDs and timestamps with other logs from the same machine (System, Application) and with the HMAC chain result.'
+            )
+        else:
+            return (
+                'Low',
+                'Slightly unusual order, may be normal activity. Low priority.',
+                'Review only if nearby High severity regions exist.'
+            )
+
+    blocks = []
+    in_block = False
+    start_idx = 0
+    for i, flag in enumerate(flag_series):
+        if flag == 1 and not in_block:
+            in_block = True
+            start_idx = i
+        elif flag == 0 and in_block:
+            in_block = False
+            end_idx = i - 1
+            b_start_time = str(time_series[start_idx])[:19]
+            b_end_time = str(time_series[end_idx])[:19]
+            b_count = int(end_idx - start_idx + 1)
+            b_max_score = float(np.max(score_series[start_idx : end_idx + 1]))
+            sev, meaning, action = _classify_block(b_max_score)
+            blocks.append({
+                'start_time': b_start_time,
+                'end_time': b_end_time,
+                'event_count': b_count,
+                'highest_score': round(b_max_score, 4),
+                'meaning': meaning,
+                'action': action,
+                'severity': sev
+            })
+    if in_block:
+        end_idx = len(flag_series) - 1
+        b_start_time = str(time_series[start_idx])[:19]
+        b_end_time = str(time_series[end_idx])[:19]
+        b_count = int(end_idx - start_idx + 1)
+        b_max_score = float(np.max(score_series[start_idx : end_idx + 1]))
+        sev, meaning, action = _classify_block(b_max_score)
+        blocks.append({
+            'start_time': b_start_time,
+            'end_time': b_end_time,
+            'event_count': b_count,
+            'highest_score': round(b_max_score, 4),
+            'meaning': meaning,
+            'action': action,
+            'severity': sev
+        })
+
+    # Sort blocks by Max Anomaly Score descending
+    blocks.sort(key=lambda x: x['highest_score'], reverse=True)
+
+    num_blocks = len(blocks)
+    h_count = sum(1 for b in blocks if b['severity'] == 'High')
+    me_count = sum(1 for b in blocks if b['severity'] == 'Medium')
+    l_count = sum(1 for b in blocks if b['severity'] == 'Low')
+    strongest_time = blocks[0]['start_time'] if blocks else "N/A"
+
+    flagged_frac = rows_flagged / max(rows_checked, 1)
+    alert_fired = bool(rows_checked >= 500 and flagged_frac > 0.03 and num_blocks >= 3)
+
+    if rows_checked < 500:
+        summary = "File too small for a reliable event order check."
+    elif alert_fired:
+        region_str = "1 region contains" if num_blocks == 1 else f"{num_blocks} regions contain"
+        h_str = f"{h_count} is High severity" if h_count == 1 else f"{h_count} are High severity"
+        summary = (
+            f"{region_str} out-of-order events, covering about {rows_flagged:,} events in total. "
+            f"{h_str}, {me_count} Medium, {l_count} Low. "
+            f"The strongest region is at {strongest_time}. "
+            "A region is wider than the actual change because the model checks windows of 10 events, so it includes neighboring events."
+        )
+    else:
+        summary = "No unusual event ordering was found."
+
+    # Downsample points for visualization if dataset is large
+    step = max(1, len(df) // 1500)
+    sampled_indices = np.arange(0, len(df), step)
+    flagged_indices = np.where(flag_series == 1)[0]
+    all_indices = np.unique(np.concatenate([sampled_indices, flagged_indices]))
+    all_indices.sort()
+
+    timeline_data = {
+        'times': [str(time_series[i])[:19] for i in all_indices],
+        'scores': [float(score_series[i]) for i in all_indices],
+        'flags': [int(flag_series[i]) for i in all_indices],
+        'total_flagged': rows_flagged,
+        'threshold': float(threshold)
+    }
+
+    return {
+        'status': 'ok',
+        'summary': summary,
+        'blocks': blocks,
+        'alert_fired': alert_fired,
+        'regions_count': num_blocks,
+        'high_count': h_count,
+        'medium_count': me_count,
+        'low_count': l_count,
+        'strongest_time': strongest_time,
+        'rows_checked': rows_checked,
+        'rows_flagged': rows_flagged,
+        'max_score': max_score,
+        'mean_score': mean_score,
+        'threshold': float(threshold),
+        'timeline_data': timeline_data
+    }
 
 
 def build_all_threat_panels(df: pd.DataFrame, verdict: str) -> dict:
@@ -308,4 +549,5 @@ def build_all_threat_panels(df: pd.DataFrame, verdict: str) -> dict:
         'trend': build_trend_data(df),
         'knowledge_graph': build_knowledge_graph_data(
             df, verdict),
+        'lstm_panel': build_lstm_panel_data(df),
     }

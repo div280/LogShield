@@ -1,4 +1,7 @@
-import pytest
+try:
+    import pytest
+except ImportError:
+    pytest = None
 import pandas as pd
 import numpy as np
 import os
@@ -71,3 +74,43 @@ def test_event_id_encoded_known_values():
 def test_null_process_handled_gracefully():
     result = extract_features(SAMPLE_DATA.copy())
     assert result['process_is_suspicious'].isnull().sum() == 0
+
+
+def test_streaming_feature_extractor_adds_all_columns():
+    from src.features import StreamingFeatureExtractor
+    extractor = StreamingFeatureExtractor()
+    sample_ev = {
+        'event_id': 4624,
+        'time_created': '2026-08-25T08:00:00+00:00',
+        'process_name': 'lsass.exe'
+    }
+    enriched = extractor.extract_single(sample_ev)
+    expected = ['delta_t', 'event_frequency', 'hour_of_day', 'is_business_hours',
+                'event_id_encoded', 'is_critical_event', 'log_burst', 'process_is_suspicious']
+    for col in expected:
+        assert col in enriched, f"Missing streaming feature: {col}"
+    assert enriched['delta_t'] == 0.0
+    assert enriched['event_frequency'] == 1
+    assert enriched['event_id_encoded'] == 3
+
+
+def test_streaming_delta_t_and_frequency_tracking():
+    from src.features import StreamingFeatureExtractor
+    extractor = StreamingFeatureExtractor(window_seconds=60.0)
+    ev1 = {'event_id': 4624, 'time_created': '2026-08-25T08:00:00+00:00', 'process_name': 'lsass.exe'}
+    ev2 = {'event_id': 4625, 'time_created': '2026-08-25T08:00:05+00:00', 'process_name': 'lsass.exe'}
+    res1 = extractor.extract_single(ev1)
+    res2 = extractor.extract_single(ev2)
+    assert res1['delta_t'] == 0.0
+    assert res2['delta_t'] == 5.0
+    assert res2['event_frequency'] == 2
+
+
+def test_streaming_critical_and_suspicious_flags():
+    from src.features import StreamingFeatureExtractor
+    extractor = StreamingFeatureExtractor()
+    ev = {'event_id': 1102, 'time_created': '2026-08-25T08:00:00+00:00', 'process_name': 'wevtutil.exe'}
+    res = extractor.extract_single(ev)
+    assert res['is_critical_event'] == 1
+    assert res['process_is_suspicious'] == 1
+

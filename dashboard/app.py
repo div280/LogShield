@@ -18,7 +18,13 @@ import hashlib
 import io
 import requests
 from datetime import datetime
-sys.path.insert(0, '.')
+# Bulletproof sys.path resolution for all execution directories
+_this_dir = os.path.dirname(os.path.abspath(__file__))
+_parent_dir = os.path.dirname(_this_dir)
+_root_dir = os.path.dirname(_parent_dir)
+for _p in [_parent_dir, _this_dir, _root_dir]:
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 from src.parser import parse_csv_from_bytes, MAX_FILE_SIZE
 from src.features import extract_features
@@ -27,10 +33,56 @@ from src.hmac_chain import (
     check_chain_continuity,
     check_baseline_row_count)
 from src.models.isolation_forest import predict_anomalies
+from src.models.lstm_model import predict_lstm, load_lstm
 from dashboard.utils.pdf_report import generate_pdf_report
-from dashboard.utils.threat_panels import build_all_threat_panels
-from dashboard.utils.threat_render import render_threat_overview
+from dashboard.utils.threat_panels import (
+    build_all_threat_panels,
+    build_lstm_panel_data)
+from dashboard.utils.threat_render import (
+    render_threat_overview,
+    render_lstm_panel)
 from dashboard.attack_map import create_simulated_attack_map
+
+_LSTM_CACHE = {}
+_CHAIN_CACHE = {}
+
+
+def get_cached_lstm_model(
+        model_path='models_saved/lstm_ae.keras',
+        meta_path='models_saved/lstm_meta.pkl'):
+    """Load and cache LSTM model and metadata once."""
+    cache_key = (model_path, meta_path)
+    if cache_key not in _LSTM_CACHE:
+        _LSTM_CACHE[cache_key] = load_lstm(model_path, meta_path)
+    return _LSTM_CACHE[cache_key]
+
+
+def get_cached_hmac_chain(chain_filepath='models_saved/hmac_chain.json'):
+    """Load and cache HMAC chain metadata and identity keys once."""
+    if chain_filepath not in _CHAIN_CACHE:
+        if os.path.exists(chain_filepath):
+            with open(chain_filepath, 'r') as f:
+                data = json.load(f)
+            entries = data.get('chain', [])
+            has_src = bool(entries and 'source_file' in entries[0])
+            if has_src:
+                keys = set(
+                    (str(e.get('source_file', '')), str(e.get('event_record_id', '')))
+                    for e in entries)
+            else:
+                keys = set(
+                    (str(e.get('event_record_id', '')), str(e.get('time_created', '')))
+                    for e in entries)
+            _CHAIN_CACHE[chain_filepath] = {
+                'data': data,
+                'has_source_file': has_src,
+                'keys': keys,
+                'total': len(keys)
+            }
+        else:
+            _CHAIN_CACHE[chain_filepath] = None
+    return _CHAIN_CACHE[chain_filepath]
+
 
 st.set_page_config(
     page_title="LogShield",
@@ -69,7 +121,10 @@ for _k, _v in [
     ('flagged_preview', None),
     ('threat_panels', None),
     ('baseline_mismatch', False),
-    ('baseline_warning', '')
+    ('baseline_warning', ''),
+    ('lstm_ok', False),
+    ('lstm_notice', ''),
+    ('lstm_panel', None)
 ]:
     try:
         if _k not in st.session_state:
@@ -998,8 +1053,8 @@ def geolocate_ips(ip_list):
 
 def make_processing_gauge(total_events, anomalies):
     """
-    Creates a gauge chart showing log processing rate.
-    Shows total events, anomaly percentage, threat level.
+    Creates a gauge chart showing AI anomaly rate.
+    Shows total events, anomaly percentage.
 
     Parameters:
     total_events (int): Total number of log events processed.
@@ -1014,7 +1069,7 @@ def make_processing_gauge(total_events, anomalies):
     threat_pct = (anomalies / max(total_events, 1)) * 100
 
     fig = go.Figure(go.Indicator(
-        mode="gauge+number+delta",
+        mode="gauge+number",
         value=threat_pct,
         number=dict(
             suffix="%",
@@ -1022,16 +1077,12 @@ def make_processing_gauge(total_events, anomalies):
                 size=36,
                 color=TXT1,
                 family='JetBrains Mono')),
-        delta=dict(
-            reference=5,
-            decreasing=dict(color=SUCCESS),
-            increasing=dict(color=ACCENT)),
         title=dict(
             text=(
-                "Threat Level<br>"
-                f"<span style='font-size:13px;"
+                "AI anomaly rate<br>"
+                f"<span style='font-size:12px;"
                 f"color:{TXT2}'>"
-                f"{total_events:,} events analyzed"
+                f"{total_events:,} events (flags fixed baseline share by design)"
                 f"</span>"),
             font=dict(
                 size=16,
@@ -1621,12 +1672,27 @@ def make_network_diagram(
     return fig
 
 
-def get_verdict(deleted, injected, anomalies,
-                critical, total):
-    if deleted > 0 or injected > 0:
-        return "COMPROMISED", "compromised", "red"
-    if critical > 0 or anomalies > total * 0.02:
+def get_verdict(deleted=0, injected=0, anomalies=0,
+                critical=0, total=0,
+                chain_intact=True,
+                baseline_mismatch=False,
+                hmac_failed=False,
+                lstm_alert=False):
+    # Rule 3 in Task 2: Does not match -> SUSPICIOUS with "HMAC could not be verified against a baseline". Never COMPROMISED and never CLEAN in this case.
+    if baseline_mismatch:
         return "SUSPICIOUS", "suspicious", "amber"
+
+    # Rule 2 in Task 2: Matches and verification fails -> COMPROMISED
+    del_val = deleted if isinstance(deleted, (int, float)) else 0
+    inj_val = injected if isinstance(injected, (int, float)) else 0
+    if del_val > 0 or inj_val > 0 or (not chain_intact and hmac_failed) or hmac_failed:
+        return "COMPROMISED", "compromised", "red"
+
+    # Rule 2 in Task 2: Matches and chain intact -> CLEAN unless LSTM file-level alert fires (then SUSPICIOUS)
+    if lstm_alert:
+        return "SUSPICIOUS", "suspicious", "amber"
+
+    # Rule 5 & 6: Events 1102/4719 and Isolation Forest are supporting evidence only, do not change verdict
     return "CLEAN", "clean", "green"
 
 
@@ -1673,7 +1739,7 @@ def _build_process_chart(df):
 
 
 def _build_flagged_preview(df):
-    if 'if_flag' not in df.columns:
+    if df is None or len(df) == 0:
         return None
     from dashboard.utils.threat_panels import build_flagged_events_table
     preview = build_flagged_events_table(df)
@@ -1684,30 +1750,91 @@ def _build_flagged_preview(df):
 
 def run_analysis_pipeline(file_bytes):
     """Run full analysis pipeline on uploaded bytes."""
-    df = parse_csv_from_bytes(file_bytes)
-    file_rows = len(df)
-    baseline_check = check_baseline_row_count(
-        file_rows, 'models_saved/hmac_chain.json')
-    df = extract_features(df)
+    df_raw = parse_csv_from_bytes(file_bytes)
+    file_rows = len(df_raw)
 
     CHAIN = 'models_saved/hmac_chain.json'
-    hmac_ok = os.path.exists(CHAIN)
+    cached_chain = get_cached_hmac_chain(CHAIN)
+    hmac_ok = cached_chain is not None
+
     deleted = 0
     injected = 0
+    deleted_breakdown = ""
+    injected_breakdown = ""
     chain_intact = True
+    baseline_matches = False
+    hmac_failed = False
+    break_info = None
+
     if hmac_ok:
+        has_src = cached_chain['has_source_file']
+        chain_keys = cached_chain['keys']
+
+        # Task 2: Check usable key columns (fail closed if missing)
+        req_cols = {'source_file', 'event_record_id'} if has_src else {'event_record_id', 'time_created'}
+        if not req_cols.issubset(df_raw.columns) or len(df_raw) == 0:
+            baseline_matches = False
+        else:
+            if has_src:
+                file_keys_list = list(zip(
+                    df_raw['source_file'].astype(str),
+                    df_raw['event_record_id'].astype(str)))
+            else:
+                file_keys_list = list(zip(
+                    df_raw['event_record_id'].astype(str),
+                    df_raw['time_created'].astype(str)))
+            file_keys = set(file_keys_list)
+
+            # Task 2: at least 50% of the file's keys appear in the chain
+            matching_keys = file_keys.intersection(chain_keys)
+            match_frac = len(matching_keys) / max(len(file_keys), 1)
+            baseline_matches = bool(match_frac >= 0.50)
+
+            if baseline_matches:
+                missing_keys = chain_keys - file_keys
+                extra_keys = file_keys - chain_keys
+                deleted = len(missing_keys)
+                injected = len(extra_keys)
+                if injected > 0:
+                    extra_mask = [1 if k in extra_keys else 0 for k in file_keys_list]
+                    if 'source_file' in df_raw.columns:
+                        inj_files = df_raw.loc[[bool(x) for x in extra_mask], 'source_file'].value_counts()
+                        top_inj = [f"{f}: {n}" for f, n in inj_files.head(3).items()]
+                        injected_breakdown = f" (largest additions: {', '.join(top_inj)})" if top_inj else ""
+
+    baseline_mismatch = not baseline_matches
+
+    # Preserve original uploaded order with stable index column
+    df_orig = df_raw.copy()
+    df_orig['_orig_pos'] = np.arange(file_rows)
+    df = df_raw.copy()
+    df['_orig_pos'] = np.arange(file_rows)
+    if baseline_matches and injected > 0:
+        df['hmac_extra'] = [1 if k in extra_keys else 0 for k in file_keys_list]
+    df = extract_features(df)
+
+    if hmac_ok and baseline_matches:
         try:
             df = verify_hmac_chain(df, CHAIN)
-            c = check_chain_continuity(df, CHAIN)
-            deleted = c['missing_records']
-            injected = c['extra_records']
-            chain_intact = (
-                not c['gap_detected'] and
-                not c['injection_detected'] and
-                int(df['hmac_flag'].sum()) == 0)
+            hmac_mod = int(df['hmac_flag'].sum()) if 'hmac_flag' in df.columns else 0
+            chain_intact = bool(deleted == 0 and injected == 0 and hmac_mod == 0)
+            hmac_failed = not chain_intact
+            if hmac_failed and 'hmac_flag' in df.columns and (df['hmac_flag'] == 1).any():
+                first_bad = df[df['hmac_flag'] == 1].iloc[0]
+                rec_k = first_bad.get('event_record_id', first_bad.name)
+                time_t = first_bad.get('time_created', 'unknown')
+                break_info = (
+                    f"The chain first breaks at record #{rec_k} "
+                    f"(time {time_t}); records after it cannot be trusted."
+                )
         except Exception:
-            hmac_ok = False
             chain_intact = False
+            hmac_failed = True
+    elif hmac_ok and not baseline_matches:
+        chain_intact = False
+        hmac_failed = False
+        deleted = "N/A"
+        injected = "N/A"
 
     IF = 'models_saved/isolation_forest.pkl'
     if_ok = os.path.exists(IF)
@@ -1724,11 +1851,73 @@ def run_analysis_pipeline(file_bytes):
         except Exception:
             if_ok = False
 
+    LSTM_MODEL = 'models_saved/lstm_ae.keras'
+    LSTM_META = 'models_saved/lstm_meta.pkl'
+    lstm_ok = False
+    lstm_notice = ""
+    threshold = 0.1283
+    df_lstm_scored = None
+
+    if not (os.path.exists(LSTM_MODEL) and os.path.exists(LSTM_META)):
+        lstm_notice = "The event order check could not run for this file."
+    elif len(df_orig) < 10:
+        lstm_notice = "The event order check could not run for this file."
+    else:
+        req_cols = {'event_id', 'time_created'}
+        if not req_cols.issubset(df_orig.columns):
+            lstm_notice = "The event order check could not run for this file."
+        else:
+            try:
+                # Work on copy of ORIGINAL uploaded order
+                df_lstm = df_orig.copy()
+                if 'source_file' not in df_lstm.columns:
+                    df_lstm['source_file'] = 'uploaded_log.csv'
+                if 'event_record_id' not in df_lstm.columns:
+                    df_lstm['event_record_id'] = range(1, len(df_lstm) + 1)
+
+                model, meta = get_cached_lstm_model(LSTM_MODEL, LSTM_META)
+                threshold = float(meta.get('threshold', 0.1283))
+                df_lstm_scored = predict_lstm(df_lstm, model=model, meta=meta)
+
+                # Merge lstm_flag and lstm_score back by the original-position key
+                flag_map = dict(zip(df_lstm_scored['_orig_pos'], df_lstm_scored['lstm_flag']))
+                score_map = dict(zip(df_lstm_scored['_orig_pos'], df_lstm_scored['lstm_score']))
+                df['lstm_flag'] = df['_orig_pos'].map(flag_map).fillna(0).astype(int)
+                df['lstm_score'] = df['_orig_pos'].map(score_map).fillna(0.0).astype(float)
+                lstm_ok = True
+            except Exception:
+                lstm_ok = False
+                lstm_notice = "The event order check could not run for this file."
+
+    target_lstm_df = df_lstm_scored if df_lstm_scored is not None else df
+    lstm_panel = build_lstm_panel_data(
+        target_lstm_df,
+        threshold=threshold,
+        notice=lstm_notice if not lstm_ok else "")
+
+    lstm_alert = bool(lstm_panel.get('alert_fired', False)) if lstm_ok else False
+
     total = len(df)
     verdict, vclass, vc = get_verdict(
-        deleted, injected, anomalies, critical, total)
+        deleted=deleted, injected=injected, anomalies=anomalies,
+        critical=critical, total=total,
+        chain_intact=chain_intact,
+        baseline_mismatch=baseline_mismatch,
+        hmac_failed=hmac_failed,
+        lstm_alert=lstm_alert)
     findings = build_findings(
-        df, deleted, injected, critical, anomalies)
+        df, deleted, injected, critical, anomalies,
+        baseline_mismatch=baseline_mismatch,
+        hmac_failed=hmac_failed,
+        break_info=break_info,
+        lstm_alert=lstm_alert,
+        deleted_breakdown=deleted_breakdown,
+        injected_breakdown=injected_breakdown)
+
+    baseline_warning = (
+        "HMAC could not be verified against a baseline because the uploaded dataset identity keys do not match the trusted baseline."
+        if baseline_mismatch else ""
+    )
 
     return {
         'df': df,
@@ -1744,8 +1933,11 @@ def run_analysis_pipeline(file_bytes):
         'hmac_ok': hmac_ok,
         'if_ok': if_ok,
         'chain_intact': chain_intact,
-        'baseline_mismatch': baseline_check['mismatch'],
-        'baseline_warning': baseline_check['message'],
+        'lstm_ok': lstm_ok,
+        'lstm_notice': lstm_notice,
+        'lstm_panel': lstm_panel,
+        'baseline_mismatch': baseline_mismatch,
+        'baseline_warning': baseline_warning,
         'timeline_data': _build_timeline_data(df),
         'process_chart': _build_process_chart(df),
         'flagged_preview': _build_flagged_preview(df),
@@ -1771,6 +1963,9 @@ def save_analysis_to_session(result, file_bytes):
     st.session_state.hmac_ok = result['hmac_ok']
     st.session_state.if_ok = result['if_ok']
     st.session_state.chain_intact = result['chain_intact']
+    st.session_state.lstm_ok = result.get('lstm_ok', False)
+    st.session_state.lstm_notice = result.get('lstm_notice', '')
+    st.session_state.lstm_panel = result.get('lstm_panel', None)
     st.session_state.baseline_mismatch = (
         result['baseline_mismatch'])
     st.session_state.baseline_warning = (
@@ -1930,6 +2125,27 @@ def render_analysis_results():
             "No significant anomalies detected. "
             "Log file appears authentic.")
     }
+    conf_val = (
+        "HIGH" if verdict == "CLEAN" else "MEDIUM")
+
+    if st.session_state.get('baseline_mismatch', False):
+        chain_val = "UNVERIFIED"
+        chain_col = "amber"
+        chain_delta_class = "warn"
+        chain_delta_text = "No matching baseline"
+    else:
+        chain_val = "PASS" if chain_intact else "FAIL"
+        chain_col = "green" if chain_intact else "red"
+        chain_delta_class = "bad" if chain_val == "FAIL" else "ok"
+        chain_delta_text = "HMAC-SHA256"
+
+    active_count = sum([
+        bool(st.session_state.get('hmac_ok', False)),
+        bool(st.session_state.get('if_ok', False)),
+        bool(st.session_state.get('lstm_ok', False)),
+        False
+    ])
+
     st.markdown(f"""
 <div class="verdict-banner {vclass}">
     <div>
@@ -1941,15 +2157,22 @@ def render_analysis_results():
         </div>
     </div>
     <div class="confidence-badge {vc}">
-        HIGH CONFIDENCE
+        {conf_val} CONFIDENCE
     </div>
 </div>
 """, unsafe_allow_html=True)
 
-    chain_val = "PASS" if chain_intact else "FAIL"
-    chain_col = "green" if chain_intact else "red"
-    conf_val = (
-        "HIGH" if verdict == "CLEAN" else "MEDIUM")
+    if st.session_state.get('baseline_mismatch', False):
+        del_str = "N/A"
+        del_col = "amber"
+        del_delta = "Not available"
+        del_card = "warn"
+    else:
+        del_num = deleted if isinstance(deleted, (int, float)) else 0
+        del_str = f"{del_num:,}"
+        del_col = "red" if del_num > 0 else "green"
+        del_delta = "Confirmed" if del_num > 0 else "None"
+        del_card = "accent" if del_num > 0 else "success"
 
     st.markdown(f"""
 <div class="kpi-row" style="margin-top:16px">
@@ -1983,30 +2206,26 @@ def render_analysis_results():
             {'Flagged' if anomalies>0 else 'Clean'}
         </div>
     </div>
-    <div class="kpi-card
-        {'accent' if deleted>0 else 'success'}">
-        <div class="kpi-val
-            {'red' if deleted>0 else 'green'}">
-            {deleted:,}
+    <div class="kpi-card {del_card}">
+        <div class="kpi-val {del_col}">
+            {del_str}
         </div>
         <div class="kpi-label">Deleted Records</div>
         <div class="kpi-delta
-            {'bad' if deleted>0 else 'ok'}">
-            {'Confirmed' if deleted>0 else 'None'}
+            {'bad' if del_delta=='Confirmed' else ('warn' if del_delta=='Not available' else 'ok')}">
+            {del_delta}
         </div>
     </div>
 </div>
 <div class="kpi-row">
     <div class="kpi-card
-        {'accent' if chain_val=='FAIL'
-         else 'success'}">
+        {'warn' if chain_val=='UNVERIFIED' else ('accent' if chain_val=='FAIL' else 'success')}">
         <div class="kpi-val {chain_col}">
             {chain_val}
         </div>
         <div class="kpi-label">Chain Status</div>
-        <div class="kpi-delta
-            {'bad' if chain_val=='FAIL' else 'ok'}">
-            HMAC-SHA256
+        <div class="kpi-delta {chain_delta_class}">
+            {chain_delta_text}
         </div>
     </div>
     <div class="kpi-card cyan">
@@ -2015,11 +2234,6 @@ def render_analysis_results():
         <div class="kpi-delta neutral">
             Detection certainty
         </div>
-    </div>
-    <div class="kpi-card">
-        <div class="kpi-val">2</div>
-        <div class="kpi-label">Active Layers</div>
-        <div class="kpi-delta neutral">of 4 total</div>
     </div>
     <div class="kpi-card
         {'accent' if verdict != 'CLEAN' else 'success'}">
@@ -2037,14 +2251,20 @@ def render_analysis_results():
         'Detection Results</div>',
         unsafe_allow_html=True)
 
-    l1c = 'red' if not chain_intact else (
-        'green' if hmac_ok else 'grey')
-    l1s = ('COMPROMISED' if not chain_intact else
-           'INTACT' if hmac_ok else 'UNAVAILABLE')
-    l1d = (
-        f'{deleted} deleted, {injected} injected'
-        if hmac_ok else
-        'Chain file not found')
+    if st.session_state.get('baseline_mismatch', False):
+        l1c = 'amber'
+        l1s = 'UNVERIFIED'
+        l1d = 'HMAC could not be verified against a baseline'
+    else:
+        l1c = 'red' if not chain_intact else (
+            'green' if hmac_ok else 'grey')
+        l1s = ('COMPROMISED' if not chain_intact else
+               'INTACT' if hmac_ok else 'UNAVAILABLE')
+        l1d = (
+            f'{deleted} deleted, {injected} injected'
+            if hmac_ok else
+            'Chain file not found')
+
     l2c = ('amber' if anomalies > 0 else
            'green' if if_ok else 'grey')
     l2s = ('ANOMALIES DETECTED'
@@ -2055,6 +2275,21 @@ def render_analysis_results():
         if anomalies > 0 else
         'No anomalies' if if_ok else
         'Model not loaded')
+
+    lstm_ok = st.session_state.get('lstm_ok', False)
+    lstm_panel_data = st.session_state.get('lstm_panel', None)
+    lstm_flagged = (
+        lstm_panel_data.get('rows_flagged', 0)
+        if lstm_panel_data else 0)
+    l2b_c = ('amber' if lstm_flagged > 0 else
+             'green' if lstm_ok else 'grey')
+    l2b_s = ('SHUFFLE DETECTED' if lstm_flagged > 0 else
+             'NORMAL' if lstm_ok else 'UNAVAILABLE')
+    l2b_d = (
+        f'{lstm_flagged} out-of-order events flagged'
+        if lstm_flagged > 0 else
+        'Sequence order intact' if lstm_ok else
+        st.session_state.get('lstm_notice') or 'Model not loaded')
 
     st.markdown(f"""
 <div class="layers-panel">
@@ -2068,7 +2303,7 @@ def render_analysis_results():
                 {l1s}
             </div>
             <div class="layer-detail">
-                {l1d} - Mathematical certainty
+                {l1d} - Chain verification runs in time order, so reordering of events is checked by the Event Order Check (LSTM).
             </div>
         </div>
     </div>
@@ -2085,16 +2320,16 @@ def render_analysis_results():
         </div>
     </div>
     <div class="layer-row">
-        <div class="layer-bar grey"></div>
+        <div class="layer-bar {l2b_c}"></div>
         <div>
             <div class="layer-name">
                 Layer 2b - LSTM Sequence Model
             </div>
-            <div class="layer-status grey">
-                PENDING
+            <div class="layer-status {l2b_c}">
+                {l2b_s}
             </div>
             <div class="layer-detail">
-                Requires expanded dataset
+                {l2b_d}
             </div>
         </div>
     </div>
@@ -2126,6 +2361,27 @@ def render_analysis_results():
             "Green dots: normal events  "
             "Red diamonds: anomalies  "
             "Dashed line: detection threshold")
+
+    if lstm_panel_data:
+        st.markdown(
+            '<div class="sec-label">'
+            'Event Order Check (LSTM)</div>',
+            unsafe_allow_html=True)
+        render_lstm_panel(
+            lstm_panel_data,
+            {
+                'bg': BG,
+                'surface': SURFACE,
+                'border': BORDER,
+                'accent': ACCENT,
+                'cyan': CYAN,
+                'success': SUCCESS,
+                'warn': WARN,
+                'txt1': TXT1,
+                'txt2': TXT2,
+                'txt3': TXT3,
+            },
+            height=320)
 
     process_chart = st.session_state.process_chart
     if process_chart:
@@ -2287,13 +2543,24 @@ def render_analysis_results():
         st.markdown(
             f'<div class="sec-label">'
             f'Flagged Events '
-            f'({st.session_state.anomaly_count:,})'
+            f'({len(flagged):,})'
             f'</div>',
             unsafe_allow_html=True)
+        display_flagged = flagged.head(500)
         st.dataframe(
-            flagged,
+            display_flagged,
             use_container_width=True,
             hide_index=True)
+        if len(flagged) > 500:
+            st.caption(f"Showing 500 of {len(flagged)} flagged events, strongest evidence first.")
+        csv_bytes = flagged.to_csv(index=False).encode('utf-8-sig')
+        st.download_button(
+            label=f"Download all {len(flagged)} flagged events (CSV)",
+            data=csv_bytes,
+            file_name="flagged_events.csv",
+            mime="text/csv",
+            key="download_flagged_events_csv"
+        )
 
     st.markdown(
         '<div style="margin-top:8px">'
@@ -2304,34 +2571,59 @@ def render_analysis_results():
 
 
 def build_findings(df, deleted, injected,
-                   critical, anomalies):
+                   critical, anomalies,
+                   baseline_mismatch=False,
+                   hmac_failed=False,
+                   break_info=None,
+                   lstm_alert=False,
+                   deleted_breakdown="",
+                   injected_breakdown=""):
     out = []
-    if deleted > 0:
+    if baseline_mismatch:
+        out.append({
+            'sev': 'medium',
+            'title': 'HMAC could not be verified against a baseline',
+            'detail': (
+                'HMAC could not be verified against a baseline because the '
+                'uploaded dataset does not match the cryptographic chain identity keys. '
+                'Tampering cannot be cryptographically proven or ruled out.')
+        })
+    elif hmac_failed:
+        detail_msg = break_info if break_info else (
+            'Cryptographic chain verification detected records missing, modified, or out of sequence. '
+            'Records after the break cannot be trusted.')
+        out.append({
+            'sev': 'critical',
+            'title': 'Cryptographic chain verification failed',
+            'detail': detail_msg
+        })
+
+    del_num = deleted if isinstance(deleted, (int, float)) else 0
+    inj_num = injected if isinstance(injected, (int, float)) else 0
+
+    if del_num > 0 and not baseline_mismatch:
         out.append({
             'sev': 'critical',
             'title': (
-                f'{deleted} log records '
+                f'{del_num} log records '
                 f'confirmed deleted'),
             'detail': (
-                'Cryptographic chain verification '
-                'detected records missing from this '
-                'file. This is mathematical proof of '
-                'deliberate log erasure. Attackers '
-                'delete logs to remove evidence of '
-                'privilege escalation, lateral '
+                f'{del_num} records are missing compared with the trusted baseline{deleted_breakdown}. '
+                'Cryptographic chain verification detected records missing from this file. '
+                'This is mathematical proof of deliberate log erasure. Attackers '
+                'delete logs to remove evidence of privilege escalation, lateral '
                 'movement, or data exfiltration.')
         })
-    if injected > 0:
+    if inj_num > 0 and not baseline_mismatch:
         out.append({
             'sev': 'critical',
             'title': (
-                f'{injected} records injected '
+                f'{inj_num} records injected '
                 f'into log file'),
             'detail': (
-                f'{injected} entries found that do '
-                'not appear in the trusted baseline. '
-                'These may represent forged entries '
-                'inserted to create a false audit '
+                f'{inj_num} records are extra compared with the trusted baseline{injected_breakdown}. '
+                'These entries do not appear in the trusted baseline. '
+                'These may represent forged entries inserted to create a false audit '
                 'trail or confuse investigators.')
         })
     if 'event_id' in df.columns:
@@ -2339,33 +2631,25 @@ def build_findings(df, deleted, injected,
         n4719 = (df['event_id'] == 4719).sum()
         if n1102 > 0:
             out.append({
-                'sev': 'critical',
+                'sev': 'medium',
                 'title': (
-                    f'Security log cleared '
-                    f'({n1102} instance(s)) '
-                    f'Event ID 1102'),
+                    f'Notable security event: Security log cleared '
+                    f'({n1102} instance(s)) Event ID 1102'),
                 'detail': (
                     'Event ID 1102 is generated when '
                     'the Windows Security log is cleared. '
-                    'This is performed by attackers after '
-                    'intrusion to destroy forensic '
-                    'evidence. Legitimate administrators '
-                    'rarely clear security logs.')
+                    'This is performed by administrators or attackers. '
+                    'This is supporting evidence and does not alone prove tampering.')
             })
         if n4719 > 0:
             out.append({
-                'sev': 'high',
+                'sev': 'medium',
                 'title': (
-                    f'Audit policy modified '
-                    f'({n4719} instance(s)) '
-                    f'Event ID 4719'),
+                    f'Notable security event: Audit policy modified '
+                    f'({n4719} instance(s)) Event ID 4719'),
                 'detail': (
-                    'Event ID 4719 indicates the audit '
-                    'policy was changed. Attackers modify '
-                    'audit policy before executing '
-                    'malicious actions to suppress '
-                    'logging. This is a precursor to '
-                    'anti-forensic activity.')
+                    'Event ID 4719 indicates the audit policy was changed. '
+                    'This is supporting evidence and does not alone prove tampering.')
             })
     if 'process_name' in df.columns:
         tools = ['wevtutil', 'whoami', 'net.exe',
@@ -2392,9 +2676,24 @@ def build_findings(df, deleted, injected,
                     'enumeration. Their presence '
                     'corroborates other findings.')
             })
+    if 'lstm_flag' in df.columns:
+        lstm_count = int(df['lstm_flag'].sum())
+        if lstm_count > 0:
+            out.append({
+                'sev': 'high' if lstm_alert else 'low',
+                'title': (
+                    f'{lstm_count} events with broken '
+                    f'chronological sequence (LSTM)'),
+                'detail': (
+                    f'The LSTM sequence autoencoder identified '
+                    f'{lstm_count} events with sequence violations '
+                    f'and high reconstruction error. This pattern is '
+                    f'consistent with a shuffle attack where log entries '
+                    f'were reordered to obfuscate the sequence of events.')
+            })
     if anomalies > 0 and not out:
         out.append({
-            'sev': 'medium',
+            'sev': 'info',
             'title': (
                 f'{anomalies} anomalous patterns '
                 f'detected by AI model'),
@@ -2403,7 +2702,8 @@ def build_findings(df, deleted, injected,
                 f'{anomalies} events with statistical '
                 f'properties inconsistent with the '
                 f'established normal baseline. '
-                f'Further investigation recommended.')
+                f'Note: Isolation Forest flags a fixed share of any '
+                f'file by design as supporting evidence.')
         })
     return out
 
@@ -2493,41 +2793,7 @@ with st.sidebar:
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # System status in sidebar
-    IF_READY = os.path.exists(
-        'models_saved/isolation_forest.pkl')
-    CHAIN_READY = os.path.exists(
-        'models_saved/hmac_chain.json')
-
-    st.markdown(
-        f'<div style="padding:0 12px;'
-        f'margin-top:8px">'
-        f'<div style="font-size:11px;'
-        f'font-weight:700;color:{TXT3 if dm else TXT1};'
-        f'letter-spacing:2px;'
-        f'text-transform:uppercase;'
-        f'padding-bottom:10px;'
-        f'border-bottom:1px solid {BORDER};'
-        f'margin-bottom:10px">System Status</div>',
-        unsafe_allow_html=True)
-
-    items = [
-        ("HMAC Chain", CHAIN_READY),
-        ("Isolation Forest", IF_READY),
-        ("LSTM Model", False),
-        ("Autoencoder", False),
-    ]
-    for name, ready in items:
-        dot_col = 'green' if ready else 'grey'
-        sub = 'Ready' if ready else 'Pending'
-        st.markdown(f"""
-<div class="status-row">
-    <span class="status-dot {dot_col}"></span>
-    <span class="status-label">{name}</span>
-    <span class="status-sub">{sub}</span>
-</div>""", unsafe_allow_html=True)
-
-    st.markdown('</div>', unsafe_allow_html=True)
+    # Sidebar theme toggle
 
     st.markdown("<br>", unsafe_allow_html=True)
     cur_dm = st.session_state.get("dark_mode", True)
@@ -2600,6 +2866,18 @@ if page == 'Dashboard':
     if done and st.session_state.baseline_mismatch:
         st.warning(st.session_state.baseline_warning)
 
+    if done and st.session_state.get('baseline_mismatch', False):
+        dv_str = "N/A"
+        dv_col = "amber"
+        dv_delta = "Not available"
+        dv_card = "warn"
+    else:
+        dv_num = dv if isinstance(dv, (int, float)) else 0
+        dv_str = f"{dv_num:,}"
+        dv_col = "red" if dv_num > 0 else "green"
+        dv_delta = "Confirmed" if dv_num > 0 else "None"
+        dv_card = "accent" if dv_num > 0 else "success"
+
     # KPI GRID - order: 1 4 3 2 5 7 6 8
     # 1=Total Events 4=Critical 3=AI Anomalies
     # 2=Deleted 5=Chain 7=Confidence
@@ -2640,46 +2918,62 @@ if page == 'Dashboard':
             {'Flagged' if av > 0 else 'Clean'}
         </div>
     </div>
-    <div class="kpi-card
-        {'accent' if dv > 0 else 'success'}">
-        <div class="kpi-val
-            {'red' if dv > 0 else 'green'}">
-            {dv:,}
+    <div class="kpi-card {dv_card}">
+        <div class="kpi-val {dv_col}">
+            {dv_str}
         </div>
         <div class="kpi-label">Deleted Records</div>
         <div class="kpi-delta
-            {'bad' if dv > 0 else 'ok'}">
-            {'Confirmed' if dv > 0 else 'None'}
+            {'bad' if dv_delta=='Confirmed' else ('warn' if dv_delta=='Not available' else 'ok')}">
+            {dv_delta}
         </div>
     </div>
 </div>
 """, unsafe_allow_html=True)
 
     # Second row of KPIs
-    chain_val = (
-        "FAIL" if (done and not st.session_state.chain_intact)
-        else "PASS")
-    chain_col = (
-        "red" if chain_val == "FAIL"
-        else "green")
-    conf_val = (
-        f"{DEMO['confidence']}%" if not done
-        else (
-            "HIGH" if vt == "CLEAN"
-            else "MEDIUM"))
+    if not done:
+        chain_val = DEMO['chain']
+        chain_col = "green"
+        chain_delta_class = "ok"
+        chain_delta_text = "HMAC-SHA256"
+        conf_val = f"{DEMO['confidence']}%"
+        active_count = 2
+    elif st.session_state.get('baseline_mismatch', False):
+        chain_val = "UNVERIFIED"
+        chain_col = "amber"
+        chain_delta_class = "warn"
+        chain_delta_text = "No matching baseline"
+        conf_val = "HIGH" if vt == "CLEAN" else "MEDIUM"
+        active_count = sum([
+            bool(st.session_state.get('hmac_ok', False)),
+            bool(st.session_state.get('if_ok', False)),
+            bool(st.session_state.get('lstm_ok', False)),
+            False
+        ])
+    else:
+        chain_val = "PASS" if st.session_state.chain_intact else "FAIL"
+        chain_col = "green" if st.session_state.chain_intact else "red"
+        chain_delta_class = "bad" if chain_val == "FAIL" else "ok"
+        chain_delta_text = "HMAC-SHA256"
+        conf_val = "HIGH" if vt == "CLEAN" else "MEDIUM"
+        active_count = sum([
+            bool(st.session_state.get('hmac_ok', False)),
+            bool(st.session_state.get('if_ok', False)),
+            bool(st.session_state.get('lstm_ok', False)),
+            False
+        ])
 
     st.markdown(f"""
 <div class="kpi-row">
     <div class="kpi-card
-        {'accent' if chain_val=='FAIL'
-         else 'success'}">
+        {'warn' if chain_val=='UNVERIFIED' else ('accent' if chain_val=='FAIL' else 'success')}">
         <div class="kpi-val {chain_col}">
             {chain_val}
         </div>
         <div class="kpi-label">Chain Status</div>
-        <div class="kpi-delta
-            {'bad' if chain_val=='FAIL' else 'ok'}">
-            HMAC-SHA256
+        <div class="kpi-delta {chain_delta_class}">
+            {chain_delta_text}
         </div>
     </div>
     <div class="kpi-card cyan">
@@ -2689,15 +2983,6 @@ if page == 'Dashboard':
         <div class="kpi-label">Confidence</div>
         <div class="kpi-delta neutral">
             Detection certainty
-        </div>
-    </div>
-    <div class="kpi-card">
-        <div class="kpi-val">
-            2
-        </div>
-        <div class="kpi-label">Active Layers</div>
-        <div class="kpi-delta neutral">
-            of 4 total
         </div>
     </div>
     <div class="kpi-card
@@ -2795,23 +3080,31 @@ if page == 'Dashboard':
         # Log Classification donut
         if done and st.session_state.df_result is not None:
             df_r = st.session_state.df_result
-            if 'event_id' in df_r.columns:
-                cats = {
-                    'Critical (1102/4719)': len(df_r[
-                        df_r['is_critical_event']==1])
-                    if 'is_critical_event' in df_r.columns
-                    else 0,
-                    'Anomalous': st.session_state.anomaly_count,
-                    'Normal': (
-                        len(df_r) -
-                        st.session_state.anomaly_count),
-                }
+            real_crit = int(
+                st.session_state.get('critical_count', 0)
+                if 'critical_count' in st.session_state
+                else df_r['is_critical_event'].sum()
+                if 'is_critical_event' in df_r.columns
+                else len(df_r[df_r['event_id'].isin([1102, 4719])])
+                if 'event_id' in df_r.columns
+                else 0)
+            cats = {
+                'Critical (1102/4719)': real_crit,
+                'Anomalous': st.session_state.anomaly_count,
+                'Normal': max(
+                    0,
+                    len(df_r) -
+                    st.session_state.anomaly_count -
+                    real_crit),
+            }
+            center_crit = real_crit
         else:
             cats = {
                 'Critical': 7,
                 'Anomalous': 284,
                 'Normal': 31367,
             }
+            center_crit = 7
 
         cat_colors = [ACCENT, WARN, SUCCESS]
         fig_class = go.Figure(go.Pie(
@@ -2832,7 +3125,7 @@ if page == 'Dashboard':
                 '<extra></extra>')))
         fig_class.add_annotation(
             text=(
-                f"{cats.get('Critical', 7)}<br>"
+                f"{center_crit:,}<br>"
                 f"<span style='font-size:11px'>"
                 f"Critical</span>"),
             x=0.5, y=0.5,
@@ -2969,6 +3262,10 @@ if page == 'Dashboard':
             "Log file appears authentic.")
     }
 
+    badge_conf = (
+        "HIGH CONFIDENCE" if not done
+        else f"{conf_val} CONFIDENCE")
+
     st.markdown(f"""
 <div class="verdict-banner {vclass}">
     <div>
@@ -2980,7 +3277,7 @@ if page == 'Dashboard':
         </div>
     </div>
     <div class="confidence-badge {vc}">
-        HIGH CONFIDENCE
+        {badge_conf}
     </div>
 </div>
 """, unsafe_allow_html=True)
@@ -3034,14 +3331,32 @@ if page == 'Dashboard':
 
     with ch2:
         # Detection layer donut
-        layer_vals = [1, 1, 0, 0]
-        layer_names = [
-            'HMAC Chain',
-            'Isolation Forest',
-            'LSTM (pending)',
-            'Autoencoder (pending)']
-        layer_colors = [
-            SUCCESS, WARN, BORDER, BORDER]
+        if not done:
+            layer_names = [
+                'HMAC Chain (Active)',
+                'Isolation Forest (Active)',
+                'LSTM (pending)',
+                'Autoencoder (pending)']
+            layer_colors = [
+                SUCCESS, WARN, BORDER, BORDER]
+            donut_active_count = 2
+        else:
+            hmac_on = bool(st.session_state.get('hmac_ok', False))
+            if_on = bool(st.session_state.get('if_ok', False))
+            lstm_on = bool(st.session_state.get('lstm_ok', False))
+
+            layer_names = [
+                'HMAC Chain' if hmac_on else 'HMAC Chain (inactive)',
+                'Isolation Forest' if if_on else 'Isolation Forest (inactive)',
+                'LSTM Autoencoder' if lstm_on else 'LSTM (pending)',
+                'Autoencoder (pending)']
+            layer_colors = [
+                SUCCESS if hmac_on else BORDER,
+                WARN if if_on else BORDER,
+                ACCENT if lstm_on else BORDER,
+                BORDER]
+            donut_active_count = sum([hmac_on, if_on, lstm_on, False])
+
         fig2 = go.Figure(go.Pie(
             values=[25, 25, 25, 25],
             labels=layer_names,
@@ -3051,7 +3366,7 @@ if page == 'Dashboard':
             textinfo='none',
             hoverinfo='label'))
         fig2.add_annotation(
-            text='2/4<br><span style="font-size:11px">'
+            text=f'{donut_active_count}/4<br><span style="font-size:11px">'
                  'Active</span>',
             x=0.5, y=0.5,
             font=dict(
@@ -3305,18 +3620,23 @@ elif page == 'Threat Overview':
 
         # Add AI detection node
         anom = st.session_state.anomaly_count
-        ai_col = WARN if anom > 0 else SUCCESS
+        lstm_cnt = (
+            int(df_r['lstm_flag'].sum())
+            if 'lstm_flag' in df_r.columns
+            else 0)
+        lstm_txt = (
+            f"{lstm_cnt:,} order anomalies"
+            if 'lstm_flag' in df_r.columns
+            else "Pending")
+        ai_col = WARN if (anom > 0 or lstm_cnt > 0) else SUCCESS
         nodes.append(
             f"AI Detection\n{anom} Anomalies")
         node_colors.append(ai_col)
         node_sizes.append(35)
         node_text.append(
             f"Layer 2: AI/ML Detection<br>"
-            f"Model: Isolation Forest<br>"
-            f"Anomalies: {anom:,}<br>"
-            f"Rate: "
-            f"{anom/max(len(df_r),1)*100:.1f}%<br>"
-            f"LSTM: Pending<br>"
+            f"Isolation Forest: {anom:,}<br>"
+            f"LSTM: {lstm_txt}<br>"
             f"Autoencoder: Pending")
         edges.append((0, len(nodes)-1))
 
@@ -3761,113 +4081,5 @@ elif page == 'Report':
 
 # -- PAGE: LIVE MONITOR --
 elif page == 'Live Monitor':
-
-    st.markdown(f"""
-<div class="top-bar">
-    <div class="top-bar-title">Live Monitor</div>
-    <div class="top-bar-meta">
-        <span>Real-time Windows Event Log monitoring
-        </span>
-    </div>
-</div>
-""", unsafe_allow_html=True)
-
-    st.markdown(
-        '<div class="page-wrap">',
-        unsafe_allow_html=True)
-
-    st.markdown(
-        '<div class="sec-label">'
-        'Monitor Configuration</div>',
-        unsafe_allow_html=True)
-
-    folder = st.text_input(
-        "Folder path",
-        value=r"C:\Windows\System32\winevt\Logs")
-
-    c1, c2, c3 = st.columns([2, 2, 6])
-    with c1:
-        start = st.button(
-            "Start",
-            type="primary",
-            use_container_width=True)
-    with c2:
-        stop = st.button(
-            "Stop",
-            use_container_width=True)
-
-    if start:
-        if not os.path.exists(folder):
-            st.error("Path not found.")
-        else:
-            st.success(f"Monitoring: {folder}")
-
-            # Live chart placeholder
-            st.markdown(
-                '<div class="sec-label">'
-                'Live Activity</div>',
-                unsafe_allow_html=True)
-
-            chart_placeholder = st.empty()
-            counter_placeholder = st.empty()
-
-            # Simulate live updates (3 cycles)
-            for i in range(3):
-                t = pd.date_range(
-                    datetime.utcnow(),
-                    periods=20,
-                    freq='5s')
-                y = np.random.uniform(0, 0.3, 20)
-                if i == 2:
-                    y[15] = 0.9
-
-                fig = go.Figure()
-                fig.add_trace(go.Scatter(
-                    x=list(range(len(t))),
-                    y=y,
-                    mode='lines+markers',
-                    line=dict(
-                        color=ACCENT,
-                        width=2),
-                    marker=dict(
-                        color=[
-                            ACCENT if v > 0.5
-                            else SUCCESS
-                            for v in y],
-                        size=6)))
-                fig.update_layout(
-                    **make_chart_layout(280),
-                    title=dict(
-                        text='Live Anomaly Score',
-                        font=dict(
-                            size=13,
-                            color=TXT1)))
-                chart_placeholder.plotly_chart(
-                    fig,
-                    use_container_width=True,
-                    config={
-                        'displayModeBar': False})
-                counter_placeholder.caption(
-                    f"Events processed: "
-                    f"{(i+1)*20}  |  "
-                    f"Alerts: "
-                    f"{'1' if i==2 else '0'}")
-                time.sleep(2)
-
-    if stop:
-        st.info("Monitoring stopped.")
-
-    st.markdown(
-        '<div class="sec-label">'
-        'Detection Capability</div>',
-        unsafe_allow_html=True)
-    st.markdown(f"""
-| Layer | Method | Detects | Status |
-|---|---|---|---|
-| 1 | HMAC-SHA256 Chain | Deletion, modification | Active |
-| 2a | Isolation Forest | Temporal gaps | Active |
-| 2b | LSTM | Sequence violations | Pending |
-| 2c | Autoencoder | Log injection | Pending |
-""")
-
-    st.markdown('</div>', unsafe_allow_html=True)
+    from dashboard.components.live_tab import render_live_tab
+    render_live_tab()

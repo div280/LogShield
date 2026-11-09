@@ -80,3 +80,120 @@ def extract_features(df: pd.DataFrame) -> pd.DataFrame:
         print(f"Error in extract_features: {e}")
         return df
 
+
+class StreamingFeatureExtractor:
+    """Stateful rolling feature extractor for real-time streaming events.
+
+    Maintains rolling time windows to compute delta_t and 60-second frequency
+    in real-time without buffering whole historical DataFrames.
+    """
+
+    def __init__(self, window_seconds: float = 60.0):
+        """Initialize streaming state and rolling deque buffer.
+
+        Parameters:
+            window_seconds (float): Window size in seconds for frequency calculation.
+
+        Returns:
+            None
+
+        Time Complexity: O(1)
+        Space Complexity: O(1)
+        """
+        self.window_seconds = float(window_seconds)
+        self.last_event_time: Optional[pd.Timestamp] = None
+        self.recent_timestamps: list = []
+        self.encoding = {
+            1102: 1, 4719: 2, 4624: 3, 4625: 4,
+            4634: 5, 4688: 6, 4663: 7, 4672: 8, 4698: 9
+        }
+
+    def reset(self) -> None:
+        """Reset historical state and clear timestamp buffer.
+
+        Parameters:
+            None
+
+        Returns:
+            None
+
+        Time Complexity: O(1)
+        Space Complexity: O(1)
+        """
+        self.last_event_time = None
+        self.recent_timestamps.clear()
+
+    def extract_single(self, event: dict) -> dict:
+        """Extract the 8 ML features for a single live incoming event.
+
+        Parameters:
+            event (dict): Ingested event dictionary containing time_created,
+                          event_id, and process_name.
+
+        Returns:
+            dict: Event dictionary enriched with the 8 ML features.
+
+        Time Complexity: O(k) where k is the number of events in the 60s window (typically k < 100).
+        Space Complexity: O(1) per event.
+        """
+        res = dict(event)
+
+        # Parse timestamp safely
+        try:
+            current_time = pd.to_datetime(res.get('time_created'), utc=True)
+            if pd.isna(current_time):
+                current_time = pd.Timestamp.now(tz='UTC')
+        except Exception:
+            current_time = pd.Timestamp.now(tz='UTC')
+
+        # 1. delta_t
+        if self.last_event_time is None:
+            delta_t = 0.0
+        else:
+            diff_sec = (current_time - self.last_event_time).total_seconds()
+            delta_t = max(0.0, float(diff_sec))
+        self.last_event_time = current_time
+
+        # 2. event_frequency in rolling window
+        current_sec = current_time.timestamp()
+        cutoff_sec = current_sec - self.window_seconds
+        # Clean older timestamps
+        self.recent_timestamps = [t for t in self.recent_timestamps if t >= cutoff_sec]
+        self.recent_timestamps.append(current_sec)
+        frequency = len(self.recent_timestamps)
+
+        # 3. hour_of_day
+        hour = int(current_time.hour)
+
+        # 4. is_business_hours (9 to 18)
+        is_bus = 1 if (9 <= hour <= 18) else 0
+
+        # 5. event_id_encoded
+        try:
+            eid = int(res.get('event_id', 0))
+        except (ValueError, TypeError):
+            eid = 0
+        eid_enc = int(self.encoding.get(eid, 0))
+
+        # 6. is_critical_event
+        is_crit = 1 if eid in CRITICAL_EVENT_IDS else 0
+
+        # 7. log_burst
+        burst = 1 if frequency > 100 else 0
+
+        # 8. process_is_suspicious
+        proc = str(res.get('process_name', '')).lower()
+        is_susp_proc = int(any(s in proc for s in SUSPICIOUS_PROCESSES)) if proc and proc != 'unknown' else 0
+
+        res['delta_t'] = delta_t
+        res['event_frequency'] = frequency
+        res['hour_of_day'] = hour
+        res['is_business_hours'] = is_bus
+        res['event_id_encoded'] = eid_enc
+        res['is_critical_event'] = is_crit
+        res['log_burst'] = burst
+        res['process_is_suspicious'] = is_susp_proc
+
+        return res
+
+

@@ -44,11 +44,11 @@ simultaneously without coordinating first.
 
 Saviour (Team Lead): parser.py, features.py,
                      paper writing, project coordination
-Ankitha:             tamper.py, isolation_forest.py,
+kitha:             tamper.py, isolation_forest.py,
                      live_tail/watcher.py
-Divyasree:           lstm_model.py, autoencoder.py,
+sree:           lstm_model.py, autoencoder.py,
                      Google Colab model training
-Shreya + Yashaswini: dashboard/app.py, fusion.py,
+shaha + Yaya: dashboard/app.py, fusion.py,
                      pdf_report.py, deployment
 
 All 4 together: Overleaf paper, PROJECT_CONTEXT.md,
@@ -366,9 +366,22 @@ BUILD → TEST → FIX → RETEST → APPROVE → NEXT PHASE
 - [x] Phase 3 — Isolation Forest model
 - [x] Phase 3.5 — HMAC-SHA256 chain implementation
 - [ ] Phase 4 — LSTM + Autoencoder models
-- [ ] Phase 5 — Score fusion + live tail watcher
+- [x] Phase 5 — Score fusion + live tail watcher
 - [x] Phase 6 complete enterprise dashboard
 - [ ] Phase 7 — Deployment to Streamlit Cloud
+
+---
+
+## Phase 5 Status Update & Real-Time Live Architecture Notes
+- Real-time live ingestion engine implemented in `live_tail/watcher.py` with threaded non-blocking queue and dual-mode execution (Live Windows Event Log + Live Simulation/Replay).
+- Safe permission handling: automatically probes Windows Event log access; falls back safely to simulation if elevated permissions to Security log are restricted, preventing app crashes.
+- Real-time streaming feature extraction in `src/features.py` via `StreamingFeatureExtractor` (rolling 60s window, O(1) per-event latency).
+- Dual-layer live pipeline in `live_tail/live_pipeline.py`:
+  - Layer 1: Real-time HMAC-SHA256 forward chaining and sequence continuity checks (Gap Attack detection).
+  - Layer 2: Real-time Isolation Forest inference for anomaly scoring.
+  - Critical override: Event ID 1102 ("The audit log was cleared") immediately flags COMPROMISED.
+- Live Dashboard component `dashboard/components/live_tab.py` integrates live telemetry KPI cards, real-time Plotly anomaly score chart, live scrolling feed, and a one-click "Live Attack Injection" panel (Audit Clear 1102, Gap Attack, Mimikatz binary, Shuffle attack) for review and viva defense.
+- Full test suites `tests/test_live_watcher.py` and `tests/test_live_pipeline.py` pass 100%.
 
 ---
 

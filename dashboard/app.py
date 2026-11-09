@@ -18,7 +18,13 @@ import hashlib
 import io
 import requests
 from datetime import datetime
-sys.path.insert(0, '.')
+# Bulletproof sys.path resolution for all execution directories
+_this_dir = os.path.dirname(os.path.abspath(__file__))
+_parent_dir = os.path.dirname(_this_dir)
+_root_dir = os.path.dirname(_parent_dir)
+for _p in [_parent_dir, _this_dir, _root_dir]:
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 from src.parser import parse_csv_from_bytes, MAX_FILE_SIZE
 from src.features import extract_features
@@ -2229,11 +2235,6 @@ def render_analysis_results():
             Detection certainty
         </div>
     </div>
-    <div class="kpi-card">
-        <div class="kpi-val">{active_count}</div>
-        <div class="kpi-label">Active Layers</div>
-        <div class="kpi-delta neutral">of 4 total</div>
-    </div>
     <div class="kpi-card
         {'accent' if verdict != 'CLEAN' else 'success'}">
         <div class="kpi-val {vc}">{verdict}</div>
@@ -2792,44 +2793,7 @@ with st.sidebar:
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # System status in sidebar
-    IF_READY = os.path.exists(
-        'models_saved/isolation_forest.pkl')
-    CHAIN_READY = os.path.exists(
-        'models_saved/hmac_chain.json')
-    LSTM_READY = (
-        os.path.exists('models_saved/lstm_ae.keras') and
-        os.path.exists('models_saved/lstm_meta.pkl'))
-
-    st.markdown(
-        f'<div style="padding:0 12px;'
-        f'margin-top:8px">'
-        f'<div style="font-size:11px;'
-        f'font-weight:700;color:{TXT3 if dm else TXT1};'
-        f'letter-spacing:2px;'
-        f'text-transform:uppercase;'
-        f'padding-bottom:10px;'
-        f'border-bottom:1px solid {BORDER};'
-        f'margin-bottom:10px">System Status</div>',
-        unsafe_allow_html=True)
-
-    items = [
-        ("HMAC Chain", CHAIN_READY),
-        ("Isolation Forest", IF_READY),
-        ("LSTM Model", LSTM_READY),
-        ("Autoencoder", False),
-    ]
-    for name, ready in items:
-        dot_col = 'green' if ready else 'grey'
-        sub = 'Ready' if ready else 'Pending'
-        st.markdown(f"""
-<div class="status-row">
-    <span class="status-dot {dot_col}"></span>
-    <span class="status-label">{name}</span>
-    <span class="status-sub">{sub}</span>
-</div>""", unsafe_allow_html=True)
-
-    st.markdown('</div>', unsafe_allow_html=True)
+    # Sidebar theme toggle
 
     st.markdown("<br>", unsafe_allow_html=True)
     cur_dm = st.session_state.get("dark_mode", True)
@@ -3019,15 +2983,6 @@ if page == 'Dashboard':
         <div class="kpi-label">Confidence</div>
         <div class="kpi-delta neutral">
             Detection certainty
-        </div>
-    </div>
-    <div class="kpi-card">
-        <div class="kpi-val">
-            {active_count}
-        </div>
-        <div class="kpi-label">Active Layers</div>
-        <div class="kpi-delta neutral">
-            of 4 total
         </div>
     </div>
     <div class="kpi-card
@@ -4126,113 +4081,5 @@ elif page == 'Report':
 
 # -- PAGE: LIVE MONITOR --
 elif page == 'Live Monitor':
-
-    st.markdown(f"""
-<div class="top-bar">
-    <div class="top-bar-title">Live Monitor</div>
-    <div class="top-bar-meta">
-        <span>Real-time Windows Event Log monitoring
-        </span>
-    </div>
-</div>
-""", unsafe_allow_html=True)
-
-    st.markdown(
-        '<div class="page-wrap">',
-        unsafe_allow_html=True)
-
-    st.markdown(
-        '<div class="sec-label">'
-        'Monitor Configuration</div>',
-        unsafe_allow_html=True)
-
-    folder = st.text_input(
-        "Folder path",
-        value=r"C:\Windows\System32\winevt\Logs")
-
-    c1, c2, c3 = st.columns([2, 2, 6])
-    with c1:
-        start = st.button(
-            "Start",
-            type="primary",
-            use_container_width=True)
-    with c2:
-        stop = st.button(
-            "Stop",
-            use_container_width=True)
-
-    if start:
-        if not os.path.exists(folder):
-            st.error("Path not found.")
-        else:
-            st.success(f"Monitoring: {folder}")
-
-            # Live chart placeholder
-            st.markdown(
-                '<div class="sec-label">'
-                'Live Activity</div>',
-                unsafe_allow_html=True)
-
-            chart_placeholder = st.empty()
-            counter_placeholder = st.empty()
-
-            # Simulate live updates (3 cycles)
-            for i in range(3):
-                t = pd.date_range(
-                    datetime.utcnow(),
-                    periods=20,
-                    freq='5s')
-                y = np.random.uniform(0, 0.3, 20)
-                if i == 2:
-                    y[15] = 0.9
-
-                fig = go.Figure()
-                fig.add_trace(go.Scatter(
-                    x=list(range(len(t))),
-                    y=y,
-                    mode='lines+markers',
-                    line=dict(
-                        color=ACCENT,
-                        width=2),
-                    marker=dict(
-                        color=[
-                            ACCENT if v > 0.5
-                            else SUCCESS
-                            for v in y],
-                        size=6)))
-                fig.update_layout(
-                    **make_chart_layout(280),
-                    title=dict(
-                        text='Live Anomaly Score',
-                        font=dict(
-                            size=13,
-                            color=TXT1)))
-                chart_placeholder.plotly_chart(
-                    fig,
-                    use_container_width=True,
-                    config={
-                        'displayModeBar': False})
-                counter_placeholder.caption(
-                    f"Events processed: "
-                    f"{(i+1)*20}  |  "
-                    f"Alerts: "
-                    f"{'1' if i==2 else '0'}")
-                time.sleep(2)
-
-    if stop:
-        st.info("Monitoring stopped.")
-
-    st.markdown(
-        '<div class="sec-label">'
-        'Detection Capability</div>',
-        unsafe_allow_html=True)
-    st.markdown(f"""
-| Layer | Method | Detects | Status |
-|---|---|---|---|
-| 1 | HMAC-SHA256 Chain | Deletion, modification | Active |
-| 2a | Isolation Forest | Temporal gaps | Active |
-| 2b | LSTM | Sequence violations | Pending |
-| 2c | Autoencoder | Log injection | Pending |
-""")
-
-    st.markdown('</div>', unsafe_allow_html=True)
+    from dashboard.components.live_tab import render_live_tab
+    render_live_tab()

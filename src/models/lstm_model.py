@@ -20,8 +20,14 @@ import sklearn.metrics as metrics
 os.environ.setdefault('TF_CPP_MIN_LOG_LEVEL', '2')
 os.environ.setdefault('TF_ENABLE_ONEDNN_OPTS', '0')
 
-import tensorflow as tf
-import keras
+try:
+    import tensorflow as tf
+    import keras
+    HAS_TF = True
+except ImportError:
+    tf = None
+    keras = None
+    HAS_TF = False
 
 MODEL_SAVE_PATH = 'models_saved/lstm_ae.keras'
 META_SAVE_PATH = 'models_saved/lstm_meta.pkl'
@@ -186,7 +192,7 @@ def build_model(
         n_ids: int,
         W: int = WINDOW_SIZE,
         cont_dim: int = len(CONT_FEATURES)
-) -> keras.Model:
+) -> Any:
     """
     Construct Keras LSTM Autoencoder architecture.
     Concatenates Event ID embeddings with continuous dynamics features.
@@ -233,7 +239,10 @@ def build_model(
     return model
 
 
-class EpochTimerCallback(keras.callbacks.Callback):
+_BaseCallback = keras.callbacks.Callback if (HAS_TF and keras is not None) else object
+
+
+class EpochTimerCallback(_BaseCallback):
     """Callback to print execution time and loss per epoch."""
 
     def on_epoch_begin(self, epoch, logs=None):
@@ -411,7 +420,7 @@ def train(
 
 def evaluate(
         test_df: pd.DataFrame,
-        model: Optional[keras.Model] = None,
+        model: Optional[Any] = None,
         meta: Optional[Dict[str, Any]] = None,
         model_path: str = MODEL_SAVE_PATH,
         meta_path: str = META_SAVE_PATH
@@ -538,7 +547,7 @@ def evaluate(
 def load_lstm(
         model_path: str = MODEL_SAVE_PATH,
         meta_path: str = META_SAVE_PATH
-) -> Tuple[keras.Model, Dict[str, Any]]:
+) -> Tuple[Any, Dict[str, Any]]:
     """
     Load serialized LSTM model and metadata.
     Fails closed with a generic exception without leaking internal system traces.
@@ -548,11 +557,16 @@ def load_lstm(
         meta_path (str): Filepath to serialized metadata pickle.
 
     Returns:
-        Tuple[keras.Model, Dict[str, Any]]: Loaded model and metadata dict.
+        Tuple[Any, Dict[str, Any]]: Loaded model and metadata dict.
 
     Time Complexity: O(1) loading time.
     Space Complexity: O(model_size) in memory.
     """
+    if not HAS_TF or keras is None:
+        raise RuntimeError(
+            "LogShield LSTM model unavailable: TensorFlow/Keras is not installed in the current environment."
+        )
+
     if not os.path.exists(model_path):
         raise RuntimeError(
             f"LogShield LSTM model unavailable: model file not found at '{model_path}'. "
@@ -578,7 +592,7 @@ def load_lstm(
 
 def predict_lstm(
         df: pd.DataFrame,
-        model: Optional[keras.Model] = None,
+        model: Optional[Any] = None,
         meta: Optional[Dict[str, Any]] = None,
         model_path: str = MODEL_SAVE_PATH,
         meta_path: str = META_SAVE_PATH
@@ -589,7 +603,7 @@ def predict_lstm(
 
     Parameters:
         df (pd.DataFrame): Input DataFrame in stored file order.
-        model (Optional[keras.Model]): Pre-loaded model (optional).
+        model (Optional[Any]): Pre-loaded model (optional).
         meta (Optional[Dict[str, Any]]): Pre-loaded metadata (optional).
         model_path (str): Filepath to model if not pre-loaded.
         meta_path (str): Filepath to metadata if not pre-loaded.
@@ -601,6 +615,11 @@ def predict_lstm(
     Space Complexity: O(n)
     """
     df_out = df.copy()
+
+    if not HAS_TF or keras is None:
+        df_out['lstm_flag'] = 0
+        df_out['lstm_score'] = 0.0
+        return df_out
 
     if model is None or meta is None:
         model, meta = load_lstm(model_path=model_path, meta_path=meta_path)

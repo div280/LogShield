@@ -226,6 +226,18 @@ def render_live_tab() -> None:
     kpis = engine.get_kpis()
     w_status = watcher.get_status()
 
+    # Telemetry Warning / Permission banner
+    if is_active and w_status.get('last_error'):
+        st.markdown(f"""
+<div style="background:rgba(255,179,0,0.15); border:1px solid #FFB300; border-radius:8px; padding:12px 16px; margin:10px 0; display:flex; align-items:center; gap:12px;">
+    <div style="font-size:20px;">⚠️</div>
+    <div>
+        <div style="color:#FFB300; font-weight:700; font-size:12px; text-transform:uppercase;">Stream Telemetry Notice</div>
+        <div style="color:{TXT1}; font-size:12px;">{w_status['last_error']}</div>
+    </div>
+</div>
+""", unsafe_allow_html=True)
+
     # -------------------------------------------------------------------------
     # Live KPI Cards Grid
     # -------------------------------------------------------------------------
@@ -357,6 +369,7 @@ def render_live_tab() -> None:
                     "Time": time_str,
                     "Record #": ev.get('event_record_id'),
                     "Event ID": ev.get('event_id'),
+                    "Account": ev.get('account_name', 'SYSTEM'),
                     "Process": ev.get('process_name'),
                     "Verdict": ev.get('verdict'),
                     "Notes": ev.get('alerts')[0] if ev.get('alerts') else "Sequence Verified"

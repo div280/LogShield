@@ -177,10 +177,14 @@ class LivePipelineEngine:
         elif event_id == 4719:
             alerts.append("HIGH RISK: System audit policy was altered (Event ID 4719)")
             is_suspicious = True
+        elif event_id == 4720:
+            alerts.append(f"SECURITY AUDIT: User account created ({enriched.get('account_name', 'user')})")
+        elif event_id == 4726:
+            alerts.append(f"SECURITY AUDIT: User account deleted ({enriched.get('account_name', 'user')})")
 
         # Check Record ID sequence continuity (Gap Attack / Log Deletion)
         if self.last_record_id is not None and record_id > 0:
-            if record_id > (self.last_record_id + 1):
+            if record_id > (self.last_record_id + 3):
                 missing = record_id - self.last_record_id - 1
                 alerts.append(f"GAP ATTACK DETECTED: Missing {missing} sequential log record(s) between #{self.last_record_id} and #{record_id}")
                 is_compromised = True

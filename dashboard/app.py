@@ -85,7 +85,7 @@ def get_cached_hmac_chain(chain_filepath='models_saved/hmac_chain.json'):
 
 
 st.set_page_config(
-    page_title="LogShield",
+    page_title="Secura",
     page_icon="https://img.icons8.com/fluency/48/shield.png",
     layout="wide",
     initial_sidebar_state="expanded"

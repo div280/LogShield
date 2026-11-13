@@ -7,12 +7,13 @@ import os
 import sys
 import time
 import json
+import re
 import queue
 import logging
 import threading
 import subprocess
 from datetime import datetime, timezone
-from typing import Callable, Optional, Dict, Any, List
+from typing import Callable, Optional, Dict, Any, List, Tuple
 
 logger = logging.getLogger("LogShield.LiveWatcher")
 
@@ -21,7 +22,7 @@ SUSPICIOUS_PROCESSES = [
     'mimikatz.exe', 'psexec.exe', 'cmd.exe', 'powershell.exe'
 ]
 
-COMMON_SECURITY_EVENT_IDS = [4624, 4625, 4634, 4688, 4663, 4672, 4698, 1102, 4719]
+COMMON_SECURITY_EVENT_IDS = [4624, 4625, 4634, 4688, 4663, 4672, 4698, 1102, 4719, 4720, 4722, 4726]
 
 
 def sanitize_text(val: Any, max_len: int = 256) -> str:
@@ -87,6 +88,7 @@ class LogWatcher:
         self._events_emitted: int = 0
         self._active_mode: str = "uninitialized"
         self._health_status: str = "Initialized"
+        self._last_error: Optional[str] = None
         self._sim_counter: int = 100000
 
     def start(self) -> None:
@@ -106,15 +108,25 @@ class LogWatcher:
             return
 
         self._stop_event.clear()
+        self._last_error = None
 
         # Decide mode
         if self.mode == "windows":
+            can_read, probe_msg = self._probe_windows_event_log()
             self._active_mode = "windows"
+            if can_read:
+                self._health_status = f"Live OS Stream Connected ({self.channel})"
+            else:
+                self._last_error = (
+                    f"Administrator privileges required to read Windows '{self.channel}' log. "
+                    "Start dashboard as Administrator, or switch to Live Simulation Stream."
+                )
+                self._health_status = "Access Denied (Admin Required)"
         elif self.mode == "simulation":
             self._active_mode = "simulation"
+            self._health_status = "Live Simulation Active (Deterministic Stream)"
         else:  # 'auto'
-            # Probe Windows Event Log access
-            can_read = self._probe_windows_event_log()
+            can_read, probe_msg = self._probe_windows_event_log()
             if can_read:
                 self._active_mode = "windows"
                 self._health_status = f"Live OS Stream Connected ({self.channel})"
@@ -257,7 +269,7 @@ class LogWatcher:
                 'provider': 'Microsoft-Windows-Eventlog',
                 'channel': 'Security',
                 'level': 'Information',
-                'task': 'Log clear',
+                'task': 'Audit Log Cleared',
                 'account_name': 'SYSTEM',
                 'process_name': 'wevtutil.exe',
                 'event_data': 'The audit log was cleared by user administrator via wevtutil.',
@@ -346,40 +358,49 @@ class LogWatcher:
             'events_emitted': self._events_emitted,
             'queue_size': self.event_queue.qsize(),
             'health_status': self._health_status,
-            'last_record_id': self._last_record_id
+            'last_record_id': self._last_record_id,
+            'last_error': self._last_error
         }
 
     # -------------------------------------------------------------------------
     # Internal Workers
     # -------------------------------------------------------------------------
 
-    def _probe_windows_event_log(self) -> bool:
+    def _probe_windows_event_log(self) -> Tuple[bool, str]:
         """Probe if PowerShell / WinEvent is permitted and accessible.
 
         Parameters:
             None
 
         Returns:
-            bool: True if accessible, False if restricted.
+            Tuple[bool, str]: (is_accessible, details_message)
 
         Time Complexity: O(1) subprocess execution.
         Space Complexity: O(1)
         """
         if sys.platform != 'win32':
-            return False
+            return False, "Not running on Windows host."
         try:
-            # Query last 1 event from chosen channel
-            cmd = [
-                'powershell', '-NoProfile', '-NonInteractive', '-Command',
-                f"(Get-WinEvent -LogName '{self.channel}' -MaxEvents 1 -ErrorAction SilentlyContinue).RecordId"
-            ]
-            res = subprocess.run(cmd, capture_output=True, text=True, timeout=3)
-            if res.returncode == 0 and res.stdout.strip().isdigit():
-                self._last_record_id = int(res.stdout.strip())
-                return True
+            ps_probe = (
+                f"try {{ "
+                f"  $e = Get-WinEvent -LogName '{self.channel}' -MaxEvents 1 -ErrorAction Stop; "
+                f"  Write-Output ('PROBE_OK:' + $e.RecordId) "
+                f"}} catch {{ "
+                f"  Write-Output ('PROBE_ERR:' + $_.Exception.GetType().Name + ':' + $_.Exception.Message) "
+                f"}}"
+            )
+            cmd = ['powershell', '-NoProfile', '-NonInteractive', '-Command', ps_probe]
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+            out = res.stdout.strip()
+            if 'PROBE_OK:' in out:
+                return True, "OK"
+            if 'PROBE_ERR:' in out:
+                err_msg = out.split('PROBE_ERR:')[-1].strip()
+                return False, err_msg
         except Exception as err:
-            logger.debug("Probe failed: %s", err)
-        return False
+            logger.debug("Probe exception: %s", err)
+            return False, str(err)
+        return False, "Unknown probe response."
 
     def _windows_worker(self) -> None:
         """Background worker thread polling live Windows Events via PowerShell.
@@ -390,30 +411,56 @@ class LogWatcher:
         logger.info("Starting live Windows event reader on channel %s", self.channel)
         while not self._stop_event.is_set():
             try:
-                # Query events newer than last record ID
-                ps_script = (
-                    f"$events = Get-WinEvent -FilterHashtable @{{LogName='{self.channel}'}} "
-                    f"-MaxEvents 20 -ErrorAction SilentlyContinue | "
+                # Query logic: if _last_record_id == 0, fetch top 10 initial seed events
+                # otherwise fetch new events strictly greater than _last_record_id
+                filter_clause = (
                     f"Where-Object {{ $_.RecordId -gt {self._last_record_id} }} | "
-                    f"Sort-Object RecordId; "
-                    f"if ($events) {{ "
-                    f"$events | ForEach-Object {{ "
-                    f"[PSCustomObject]@{{ "
-                    f"  RecordId = $_.RecordId; "
-                    f"  Id = $_.Id; "
-                    f"  TimeCreated = $_.TimeCreated.ToUniversalTime().ToString('o'); "
-                    f"  MachineName = $_.MachineName; "
-                    f"  ProviderName = $_.ProviderName; "
-                    f"  Message = $_.Message "
-                    f"}} }} | ConvertTo-Json -Compress "
-                    f"}}"
+                    if self._last_record_id > 0 else ""
                 )
+                max_events = 30 if self._last_record_id > 0 else 10
 
+                ps_script = f"""
+try {{
+    $filter = @{{LogName='{self.channel}'}}
+    $raw = Get-WinEvent -FilterHashtable $filter -MaxEvents {max_events} -ErrorAction Stop |
+        {filter_clause}
+        Sort-Object RecordId
+
+    if ($raw) {{
+        $items = $raw | ForEach-Object {{
+            $msg = if ($_.Message) {{ $_.Message.Substring(0, [Math]::Min(500, $_.Message.Length)) }} else {{ '' }}
+            [PSCustomObject]@{{
+                RecordId = [int64]$_.RecordId
+                Id = [int]$_.Id
+                TimeCreated = $_.TimeCreated.ToUniversalTime().ToString('o')
+                MachineName = [string]$_.MachineName
+                ProviderName = [string]$_.ProviderName
+                TaskDisplayName = [string]$_.TaskDisplayName
+                Message = $msg
+            }}
+        }}
+        $items | ConvertTo-Json -Compress
+    }}
+}} catch {{
+    Write-Output ('PS_ERR:' + $_.Exception.GetType().Name + ':' + $_.Exception.Message)
+}}
+"""
                 cmd = ['powershell', '-NoProfile', '-NonInteractive', '-Command', ps_script]
-                res = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+                res = subprocess.run(cmd, capture_output=True, text=True, timeout=12)
 
-                if res.returncode == 0 and res.stdout.strip():
-                    raw_out = res.stdout.strip()
+                raw_out = res.stdout.strip() if res.stdout else ""
+                if "PS_ERR:" in raw_out:
+                    err_info = raw_out.split("PS_ERR:")[-1].strip()
+                    if "UnauthorizedAccessException" in err_info or "Access is denied" in err_info:
+                        self._last_error = (
+                            f"Access Denied: Reading Windows '{self.channel}' log requires Administrator rights. "
+                            "Please run dashboard as Administrator or switch to Live Simulation Stream."
+                        )
+                        self._health_status = "Access Denied (Admin Required)"
+                    else:
+                        self._last_error = f"PowerShell Query Notice: {err_info[:160]}"
+                        self._health_status = "Warning"
+                elif raw_out:
                     try:
                         data = json.loads(raw_out)
                         if isinstance(data, dict):
@@ -423,25 +470,65 @@ class LogWatcher:
                             if rid > self._last_record_id:
                                 self._last_record_id = rid
 
+                            eid = int(item.get('Id', 0))
+                            msg = str(item.get('Message', ''))
+                            task = str(item.get('TaskDisplayName', 'Security Event'))
+                            account = 'SYSTEM'
+                            proc = 'winlogon.exe' if eid in (4624, 4625) else 'SYSTEM'
+
+                            # Contextual parsing for security events (e.g. net user, process creation)
+                            if eid == 4720:
+                                task = 'User Account Created'
+                                m = re.search(r'Account Name:\s*([^\r\n\t]+)', msg)
+                                if m:
+                                    account = m.group(1).strip()
+                                proc = 'net.exe'
+                            elif eid == 4726:
+                                task = 'User Account Deleted'
+                                m = re.search(r'Account Name:\s*([^\r\n\t]+)', msg)
+                                if m:
+                                    account = m.group(1).strip()
+                                proc = 'net.exe'
+                            elif eid in (4624, 4625):
+                                all_accounts = re.findall(r'Account Name:\s*([^\r\n\t]+)', msg)
+                                if len(all_accounts) > 1:
+                                    account = all_accounts[1].strip()
+                                elif all_accounts:
+                                    account = all_accounts[0].strip()
+                            elif eid == 4688:
+                                task = 'Process Creation'
+                                m = re.search(r'New Process Name:\s*([^\r\n]+)', msg)
+                                if m:
+                                    proc = os.path.basename(m.group(1).strip())
+                            elif eid == 1102:
+                                task = 'Audit Log Cleared'
+                                proc = 'wevtutil.exe'
+
                             parsed_event = {
                                 'source_file': f"WIN_LIVE_{self.channel.upper()}",
                                 'event_record_id': rid,
-                                'event_id': int(item.get('Id', 0)),
+                                'event_id': eid,
                                 'time_created': item.get('TimeCreated', datetime.now(timezone.utc).isoformat()),
                                 'computer': sanitize_text(item.get('MachineName', 'HOST')),
                                 'provider': sanitize_text(item.get('ProviderName', 'WinEvent')),
                                 'channel': self.channel,
                                 'level': 'Information',
-                                'task': 'Security Event',
-                                'account_name': 'SYSTEM',
-                                'process_name': 'UNKNOWN',
-                                'event_data': sanitize_text(item.get('Message', ''), max_len=500),
-                                'raw_xml_length': 300,
+                                'task': sanitize_text(task, 64),
+                                'account_name': sanitize_text(account, 64),
+                                'process_name': sanitize_text(proc, 64),
+                                'event_data': sanitize_text(msg, max_len=500),
+                                'raw_xml_length': 320,
                                 'is_tampered': 0
                             }
                             self.inject_event(parsed_event)
+
+                        # Successfully parsed events -> clear error
+                        self._last_error = None
+                        self._health_status = f"Live OS Stream Connected ({self.channel})"
                     except json.JSONDecodeError:
                         pass
+            except subprocess.TimeoutExpired:
+                logger.debug("WinEvent query timed out, retrying next cycle.")
             except Exception as err:
                 logger.warning("Windows event worker iteration error: %s", err)
 

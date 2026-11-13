@@ -172,3 +172,4 @@ if __name__ == "__main__":
     else:
         # Interactive shell: python admin_cmd.py
         interactive_console()
+

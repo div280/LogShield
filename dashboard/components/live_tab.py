@@ -17,6 +17,21 @@ from live_tail.watcher import LogWatcher
 from live_tail.live_pipeline import LivePipelineEngine
 
 
+def _format_local_time(tc_val: Any) -> str:
+    """Convert UTC or ISO timestamp to user's local host timezone (HH:MM:SS)."""
+    if not tc_val:
+        return ""
+    s = str(tc_val).strip()
+    try:
+        ts = pd.to_datetime(s)
+        if ts.tz is None:
+            ts = ts.tz_localize('UTC')
+        py_dt = ts.to_pydatetime().astimezone()
+        return py_dt.strftime("%H:%M:%S")
+    except Exception:
+        return s.split('T')[-1][:8] if 'T' in s else s[-8:]
+
+
 def _resolve_model_path(rel_path: str) -> str:
     """Resolve model path considering root and LogShield subfolder execution."""
     candidates = [
@@ -377,8 +392,7 @@ def render_live_tab() -> None:
         if len(recent_list) > 0:
             feed_data = []
             for ev in reversed(recent_list[-12:]):
-                tc = str(ev.get('time_created', ''))
-                time_str = tc.split('T')[-1][:8] if 'T' in tc else tc[-8:]
+                time_str = _format_local_time(ev.get('time_created', ''))
                 feed_data.append({
                     "Time": time_str,
                     "Record #": ev.get('event_record_id'),

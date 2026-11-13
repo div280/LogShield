@@ -89,6 +89,7 @@ class LivePipelineEngine:
         # State tracking
         self.running_hmac: str = "GENESIS_LIVE_CHAIN_SEED_0000000000000000"
         self.last_record_id: Optional[int] = None
+        self.last_record_ids: Dict[str, int] = {}
         self.last_timestamp: Optional[pd.Timestamp] = None
 
         # Rolling buffers
@@ -138,6 +139,7 @@ class LivePipelineEngine:
         self.feature_extractor.reset()
         self.running_hmac = "GENESIS_LIVE_CHAIN_SEED_0000000000000000"
         self.last_record_id = None
+        self.last_record_ids.clear()
         self.last_timestamp = None
         self.recent_events.clear()
         self.recent_alerts.clear()
@@ -182,17 +184,20 @@ class LivePipelineEngine:
         elif event_id == 4726:
             alerts.append(f"SECURITY AUDIT: User account deleted ({enriched.get('account_name', 'user')})")
 
-        # Check Record ID sequence continuity (Gap Attack / Log Deletion)
-        if self.last_record_id is not None and record_id > 0:
-            if record_id > (self.last_record_id + 3):
-                missing = record_id - self.last_record_id - 1
-                alerts.append(f"GAP ATTACK DETECTED: Missing {missing} sequential log record(s) between #{self.last_record_id} and #{record_id}")
+        # Check Record ID sequence continuity per source stream (Gap Attack / Log Deletion)
+        src = str(enriched.get('source_file', 'STREAM'))
+        last_id_for_src = self.last_record_ids.get(src)
+        if last_id_for_src is not None and record_id > 0:
+            if record_id > (last_id_for_src + 3):
+                missing = record_id - last_id_for_src - 1
+                alerts.append(f"GAP ATTACK DETECTED: Missing {missing} sequential log record(s) in {src} between #{last_id_for_src} and #{record_id}")
                 is_compromised = True
-            elif record_id < self.last_record_id:
-                alerts.append(f"SHUFFLE ATTACK DETECTED: Out-of-order Record #{record_id} arrived after #{self.last_record_id}")
+            elif record_id < last_id_for_src:
+                alerts.append(f"SHUFFLE ATTACK DETECTED: Out-of-order Record #{record_id} arrived after #{last_id_for_src} in {src}")
                 is_suspicious = True
 
         if record_id > 0:
+            self.last_record_ids[src] = record_id
             self.last_record_id = record_id
 
         # Update HMAC chain

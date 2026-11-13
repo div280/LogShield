@@ -429,7 +429,7 @@ class LogWatcher:
                     f"Where-Object {{ $_.RecordId -gt {self._last_record_id} }} | "
                     if self._last_record_id > 0 else ""
                 )
-                max_events = 30 if self._last_record_id > 0 else 10
+                max_events = 50 if self._last_record_id > 0 else 25
 
                 ps_script = f"""
 try {{

@@ -80,7 +80,7 @@ def _get_live_engine() -> LivePipelineEngine:
         st.session_state.live_engine = LivePipelineEngine(
             if_model_path=_resolve_model_path("models_saved/isolation_forest.pkl"),
             lstm_meta_path=_resolve_model_path("models_saved/lstm_meta.pkl"),
-            max_history=50
+            max_history=300
         )
     return st.session_state.live_engine
 
@@ -248,7 +248,7 @@ def render_live_tab() -> None:
     # Ingestion & Pipeline Execution
     # -------------------------------------------------------------------------
     if is_active:
-        new_events = watcher.get_all_events(max_count=20)
+        new_events = watcher.get_all_events(max_count=100)
         for ev in new_events:
             engine.process_event(ev)
 
@@ -378,20 +378,20 @@ def render_live_tab() -> None:
                 paper_bgcolor='rgba(0,0,0,0)',
                 font=dict(color=TXT2, size=11),
                 margin=dict(l=30, r=20, t=20, b=30),
-                height=260,
+                height=380,
                 xaxis=dict(title="Recent Events Window", gridcolor=BORDER, zeroline=False),
                 yaxis=dict(title="Score (0-1)", range=[-0.05, 1.05], gridcolor=BORDER, zeroline=False),
                 showlegend=False
             )
             st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
         else:
-            st.markdown(f'<div style="height:260px; display:flex; align-items:center; justify-content:center; background:{SURFACE}; border:1px solid {BORDER}; border-radius:8px; color:{TXT2}; font-size:13px;">Waiting for stream to start... Click "Start Stream" above.</div>', unsafe_allow_html=True)
+            st.markdown(f'<div style="height:380px; display:flex; align-items:center; justify-content:center; background:{SURFACE}; border:1px solid {BORDER}; border-radius:8px; color:{TXT2}; font-size:13px;">Waiting for stream to start... Click "Start Stream" above.</div>', unsafe_allow_html=True)
 
     with tab_col:
         st.markdown(f'<div style="font-size:11px; font-weight:700; letter-spacing:1px; text-transform:uppercase; color:{CYAN}; margin-bottom:8px;">Live Stream Feed (Most Recent)</div>', unsafe_allow_html=True)
         if len(recent_list) > 0:
             feed_data = []
-            for ev in reversed(recent_list[-12:]):
+            for ev in reversed(recent_list[-100:]):
                 time_str = _format_local_time(ev.get('time_created', ''))
                 feed_data.append({
                     "Time": time_str,
@@ -406,11 +406,11 @@ def render_live_tab() -> None:
             st.dataframe(
                 df_feed,
                 use_container_width=True,
-                height=260,
+                height=380,
                 hide_index=True
             )
         else:
-            st.markdown(f'<div style="height:260px; display:flex; align-items:center; justify-content:center; background:{SURFACE}; border:1px solid {BORDER}; border-radius:8px; color:{TXT2}; font-size:13px;">No events ingested yet.</div>', unsafe_allow_html=True)
+            st.markdown(f'<div style="height:380px; display:flex; align-items:center; justify-content:center; background:{SURFACE}; border:1px solid {BORDER}; border-radius:8px; color:{TXT2}; font-size:13px;">No events ingested yet.</div>', unsafe_allow_html=True)
 
     st.markdown('</div>', unsafe_allow_html=True)
 

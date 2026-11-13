@@ -12,3 +12,5 @@ models_saved/*.h5
 *.zip
 
 models_saved/*.keras
+live_tail/*.jsonl
+live_tail/.counter

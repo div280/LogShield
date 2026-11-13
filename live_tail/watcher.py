@@ -91,6 +91,18 @@ class LogWatcher:
         self._last_error: Optional[str] = None
         self._sim_counter: int = 100000
 
+        # Dedicated Admin CMD Bridge File
+        self._admin_stream_file = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "admin_stream.jsonl"
+        )
+        self._admin_stream_offset = 0
+        if os.path.exists(self._admin_stream_file):
+            try:
+                self._admin_stream_offset = os.path.getsize(self._admin_stream_file)
+            except OSError:
+                self._admin_stream_offset = 0
+
     def start(self) -> None:
         """Begin monitoring Windows event log in background thread.
 
@@ -532,7 +544,37 @@ try {{
             except Exception as err:
                 logger.warning("Windows event worker iteration error: %s", err)
 
+            # Poll for any live actions run in CMD Admin
+            self._poll_admin_stream()
             self._stop_event.wait(self.poll_interval)
+
+    def _poll_admin_stream(self) -> None:
+        """Poll dedicated admin command stream file for incoming events.
+
+        Time Complexity: O(k) where k is new lines in admin stream.
+        Space Complexity: O(1)
+        """
+        if not os.path.exists(self._admin_stream_file):
+            return
+        try:
+            curr_size = os.path.getsize(self._admin_stream_file)
+            if curr_size <= self._admin_stream_offset:
+                return
+
+            with open(self._admin_stream_file, "r", encoding="utf-8") as f:
+                f.seek(self._admin_stream_offset)
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        ev = json.loads(line)
+                        self.inject_event(ev)
+                    except json.JSONDecodeError:
+                        pass
+                self._admin_stream_offset = f.tell()
+        except Exception as e:
+            logger.debug("Error reading admin stream: %s", e)
 
     def _simulation_worker(self) -> None:
         """Background worker thread emitting realistic baseline clean events.
@@ -568,6 +610,7 @@ try {{
             }
 
             self.inject_event(clean_event)
+            self._poll_admin_stream()
             self._stop_event.wait(self.poll_interval)
 
     def _sanitize_event_dict(self, event: Dict[str, Any]) -> Dict[str, Any]:

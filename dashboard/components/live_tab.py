@@ -173,12 +173,26 @@ def render_live_tab() -> None:
         st.write("")
         if st.button("🔄 Reset Feed", use_container_width=True):
             engine.reset_state()
+            watcher = _get_live_watcher()
+            while not watcher.event_queue.empty():
+                try:
+                    watcher.event_queue.get_nowait()
+                except Exception:
+                    break
             st.rerun()
 
     with c_act3:
         st.write("")
         st.write("")
         auto_refresh = st.checkbox("Auto-Refresh", value=True, help="Automatically stream incoming events every 1 second")
+
+    # Live CMD Admin Bridge Status Indicator
+    st.markdown(f"""
+<div style="background:{SURFACE}; border:1px solid {BORDER}; border-radius:6px; padding:8px 14px; margin-top:10px; margin-bottom:12px; display:flex; justify-content:space-between; align-items:center;">
+    <span style="font-size:11px; color:{CYAN}; font-weight:600;">💻 Live CMD Admin Bridge: Connected</span>
+    <span style="font-size:11px; color:{TXT2};">Run <code>admin_console.bat</code> or <code>python admin_cmd.py &lt;command&gt;</code> in CMD Admin to stream live user/process actions directly into this feed.</span>
+</div>
+""", unsafe_allow_html=True)
 
     # -------------------------------------------------------------------------
     # Teacher Demo / Viva Section: One-Click Attack Triggers
